@@ -314,7 +314,7 @@ ofproto_sai_init(const struct shash *iface_hints)
                             hostif_traps[i]);
 
         attr.id = SAI_HOSTIF_TRAP_ATTR_TRAP_CHANNEL;
-        attr.value.s32 = SAI_HOSTIF_TRAP_CHANNEL_L2_NETDEV;
+        attr.value.s32 = SAI_HOSTIF_TRAP_CHANNEL_NETDEV;
         status = sai_api->host_interface_api->set_trap_attribute(hostif_traps[i],
                                                                  &attr);
         SAI_ERROR_LOG_ABORT(status, "Failed to set trap channel %d",
