@@ -10,29 +10,21 @@
 #include <netinet/ether.h>
 
 #include <netdev-provider.h>
-#include <openvswitch/vlog.h>
 #include <openflow/openflow.h>
 #include <openswitch-idl.h>
 #include <openswitch-dflt.h>
 #include <sai-api-class.h>
 #include <sai-log.h>
+#include <sai-common.h>
+#include <sai-port.h>
+#include <sai-host-intf.h>
 
 VLOG_DEFINE_THIS_MODULE(netdev_sai);
-
-#define SAI_CONFIG_DEFAULT_HW_ENABLE false
-#define SAI_CONFIG_DEFAULT_MTU 1500
 
 /* Protects 'sai_list'. */
 static struct ovs_mutex sai_netdev_list_mutex = OVS_MUTEX_INITIALIZER;
 static struct ovs_list sai_netdev_list OVS_GUARDED_BY(sai_netdev_list_mutex)
     = OVS_LIST_INITIALIZER(&sai_netdev_list);
-
-struct netdev_sai_config {
-    bool hw_enable;
-    bool autoneg;
-    int mtu;
-    int speed;
-};
 
 struct netdev_sai {
     struct netdev up;
@@ -41,185 +33,117 @@ struct netdev_sai {
     uint32_t hw_id;
     bool is_port_initialized;
     long long int carrier_resets;
-    struct netdev_sai_config config;
-    int max_speed;
+    struct ops_sai_port_config default_config;
+    struct ops_sai_port_config config;
     struct eth_addr mac_addr;
 };
 
-static inline bool is_sai_class(const struct netdev_class *);
-static inline struct netdev_sai *netdev_sai_cast(const struct netdev *);
-static struct netdev *netdev_sai_alloc(void);
-static int netdev_sai_construct(struct netdev *);
-static void netdev_sai_destruct(struct netdev *);
-static void netdev_sai_dealloc(struct netdev *);
-static void netdev_sai_mac_read(struct eth_addr *, const char *);
-static int netdev_sai_set_hw_intf_info(struct netdev *, const struct smap *);
-static bool netdev_sai_hw_intf_config_changed(const struct netdev_sai_config *,
-                                              const struct netdev_sai_config *);
-static sai_status_t netdev_sai_set_hw_intf_config_full(struct netdev_sai *,
-                                                       const struct netdev_sai_config *);
-static sai_status_t netdev_sai_set_hw_intf_config__(struct netdev_sai *,
-                                                    const struct netdev_sai_config *);
-static bool netdev_sai_args_autoneg_get(const struct smap *);
-static int netdev_sai_set_hw_intf_config(struct netdev *, const struct smap *);
-static sai_status_t netdev_sai_set_etheraddr__(struct netdev *,
-                                               const struct eth_addr mac);
-static int netdev_sai_set_etheraddr(struct netdev *, const struct eth_addr mac);
-static int netdev_sai_get_etheraddr(const struct netdev *, struct eth_addr *mac);
-static int netdev_sai_get_mtu(const struct netdev *, int *);
-static sai_status_t netdev_sai_set_mtu__(const struct netdev *, int);
-static int netdev_sai_set_mtu(const struct netdev *, int);
-static int netdev_sai_get_carrier(const struct netdev *, bool *);
-static long long int netdev_sai_get_carrier_resets(const struct netdev *);
-static int netdev_sai_get_stats(const struct netdev *, struct netdev_stats *);
-static int netdev_sai_get_features(const struct netdev *,
-                                   enum netdev_features *,
-                                   enum netdev_features *,
-                                   enum netdev_features *,
-                                   enum netdev_features *);
-static int netdev_sai_update_flags(struct netdev *, enum netdev_flags,
-                                   enum netdev_flags, enum netdev_flags *);
+static inline bool __is_sai_class(const struct netdev_class *);
+static inline struct netdev_sai *__netdev_sai_cast(const struct netdev *);
+static struct netdev *__alloc(void);
+static int __construct(struct netdev *);
+static void __destruct(struct netdev *);
+static void __dealloc(struct netdev *);
+static void __mac_read(struct eth_addr *, const char *);
+static int __set_hw_intf_info(struct netdev *, const struct smap *);
+static bool __args_autoneg_get(const struct smap *, bool);
+static bool __args_duplex_get(const struct smap *, bool);
+static int __args_pause_get(const struct smap *, bool, bool);
+static int __set_hw_intf_config(struct netdev *, const struct smap *);
+static int __set_etheraddr_full(struct netdev *, const struct eth_addr mac);
+static int __set_etheraddr(struct netdev *, const struct eth_addr mac);
+static int __get_etheraddr(const struct netdev *, struct eth_addr *mac);
+static int __get_mtu(const struct netdev *, int *);
+static int __set_mtu(const struct netdev *, int);
+static int __get_carrier(const struct netdev *, bool *);
+static long long int __get_carrier_resets(const struct netdev *);
+static int __get_stats(const struct netdev *, struct netdev_stats *);
+static int __get_features(const struct netdev *, enum netdev_features *,
+                          enum netdev_features *, enum netdev_features *,
+                          enum netdev_features *);
+static int __update_flags(struct netdev *, enum netdev_flags,
+                          enum netdev_flags, enum netdev_flags *);
 
-static const struct netdev_class netdev_sai_class = {
-    "system",
-    NULL,                       /* init */
-    NULL,                       /* run */
-    NULL,                       /* wait */
+#define NETDEV_SAI_CLASS(TYPE, CONSTRUCT, DESCRUCT, INTF_INFO, INTF_CONFIG) \
+{ \
+    PROVIDER_INIT_GENERIC(type,                 TYPE) \
+    PROVIDER_INIT_GENERIC(init,                 NULL) \
+    PROVIDER_INIT_GENERIC(run,                  NULL) \
+    PROVIDER_INIT_GENERIC(wait,                 NULL) \
+    PROVIDER_INIT_GENERIC(alloc,                __alloc) \
+    PROVIDER_INIT_GENERIC(construct,            CONSTRUCT) \
+    PROVIDER_INIT_GENERIC(destruct,             DESCRUCT) \
+    PROVIDER_INIT_GENERIC(dealloc,              __dealloc) \
+    PROVIDER_INIT_GENERIC(get_config,           NULL) \
+    PROVIDER_INIT_GENERIC(set_config,           NULL) \
+    PROVIDER_INIT_OPS_SPECIFIC(set_hw_intf_info, INTF_INFO) \
+    PROVIDER_INIT_OPS_SPECIFIC(set_hw_intf_config, INTF_CONFIG) \
+    PROVIDER_INIT_GENERIC(get_tunnel_config,    NULL) \
+    PROVIDER_INIT_GENERIC(build_header,         NULL) \
+    PROVIDER_INIT_GENERIC(push_header,          NULL) \
+    PROVIDER_INIT_GENERIC(pop_header,           NULL) \
+    PROVIDER_INIT_GENERIC(get_numa_id,          NULL) \
+    PROVIDER_INIT_GENERIC(set_multiq,           NULL) \
+    PROVIDER_INIT_GENERIC(send,                 NULL) \
+    PROVIDER_INIT_GENERIC(send_wait,            NULL) \
+    PROVIDER_INIT_GENERIC(set_etheraddr,        __set_etheraddr) \
+    PROVIDER_INIT_GENERIC(get_etheraddr,        __get_etheraddr) \
+    PROVIDER_INIT_GENERIC(get_mtu,              __get_mtu) \
+    PROVIDER_INIT_GENERIC(set_mtu,              __set_mtu) \
+    PROVIDER_INIT_GENERIC(get_ifindex,          NULL) \
+    PROVIDER_INIT_GENERIC(get_carrier,          __get_carrier) \
+    PROVIDER_INIT_GENERIC(get_carrier_resets,   __get_carrier_resets) \
+    PROVIDER_INIT_GENERIC(set_miimon_interval,  NULL) \
+    PROVIDER_INIT_GENERIC(get_stats,            __get_stats) \
+    PROVIDER_INIT_GENERIC(get_features,         __get_features) \
+    PROVIDER_INIT_GENERIC(set_advertisements,   NULL) \
+    PROVIDER_INIT_GENERIC(set_policing,         NULL) \
+    PROVIDER_INIT_GENERIC(get_qos_types,        NULL) \
+    PROVIDER_INIT_GENERIC(get_qos_capabilities, NULL) \
+    PROVIDER_INIT_GENERIC(get_qos,              NULL) \
+    PROVIDER_INIT_GENERIC(set_qos,              NULL) \
+    PROVIDER_INIT_GENERIC(get_queue,            NULL) \
+    PROVIDER_INIT_GENERIC(set_queue,            NULL) \
+    PROVIDER_INIT_GENERIC(delete_queue,         NULL) \
+    PROVIDER_INIT_GENERIC(get_queue_stats,      NULL) \
+    PROVIDER_INIT_GENERIC(queue_dump_start,     NULL) \
+    PROVIDER_INIT_GENERIC(queue_dump_next,      NULL) \
+    PROVIDER_INIT_GENERIC(queue_dump_done,      NULL) \
+    PROVIDER_INIT_GENERIC(dump_queue_stats,     NULL) \
+    PROVIDER_INIT_GENERIC(get_in4,              NULL) \
+    PROVIDER_INIT_GENERIC(set_in4,              NULL) \
+    PROVIDER_INIT_GENERIC(get_in6,              NULL) \
+    PROVIDER_INIT_GENERIC(add_router,           NULL) \
+    PROVIDER_INIT_GENERIC(get_next_hop,         NULL) \
+    PROVIDER_INIT_GENERIC(get_status,           NULL) \
+    PROVIDER_INIT_GENERIC(arp_lookup,           NULL) \
+    PROVIDER_INIT_GENERIC(update_flags,         __update_flags) \
+    PROVIDER_INIT_GENERIC(rxq_alloc,            NULL) \
+    PROVIDER_INIT_GENERIC(rxq_construct,        NULL) \
+    PROVIDER_INIT_GENERIC(rxq_destruct,         NULL) \
+    PROVIDER_INIT_GENERIC(rxq_dealloc,          NULL) \
+    PROVIDER_INIT_GENERIC(rxq_recv,             NULL) \
+    PROVIDER_INIT_GENERIC(rxq_wait,             NULL) \
+    PROVIDER_INIT_GENERIC(rxq_drain,            NULL) \
+} \
 
-    netdev_sai_alloc,
-    netdev_sai_construct,
-    netdev_sai_destruct,
-    netdev_sai_dealloc,
-    NULL,                       /* get_config */
-    NULL,                       /* set_config */
-    netdev_sai_set_hw_intf_info,
-    netdev_sai_set_hw_intf_config,
-    NULL,                       /* get_tunnel_config */
-    NULL,                       /* build header */
-    NULL,                       /* push header */
-    NULL,                       /* pop header */
-    NULL,                       /* get_numa_id */
-    NULL,                       /* set_multiq */
+static const struct netdev_class netdev_sai_class = NETDEV_SAI_CLASS(
+        "system",
+        __construct,
+        __destruct,
+        __set_hw_intf_info,
+        __set_hw_intf_config);
 
-    NULL,                       /* send */
-    NULL,                       /* send_wait */
+static const struct netdev_class netdev_sai_internal_class = NETDEV_SAI_CLASS(
+        "internal",
+        __construct,
+        __destruct,
+        __set_hw_intf_info,
+        __set_hw_intf_config);
 
-    netdev_sai_set_etheraddr,
-    netdev_sai_get_etheraddr,
-    netdev_sai_get_mtu,
-    netdev_sai_set_mtu,
-    NULL,                       /* get_ifindex */
-    netdev_sai_get_carrier,
-    netdev_sai_get_carrier_resets,
-    NULL,                       /* set_miimon_interval */
-    netdev_sai_get_stats,
-
-    netdev_sai_get_features,
-    NULL,                       /* set_advertisements */
-
-    NULL,                       /* set_policing */
-    NULL,                       /* get_qos_types */
-    NULL,                       /* get_qos_capabilities */
-    NULL,                       /* get_qos */
-    NULL,                       /* set_qos */
-    NULL,                       /* get_queue */
-    NULL,                       /* set_queue */
-    NULL,                       /* delete_queue */
-    NULL,                       /* get_queue_stats */
-    NULL,                       /* queue_dump_start */
-    NULL,                       /* queue_dump_next */
-    NULL,                       /* queue_dump_done */
-    NULL,                       /* dump_queue_stats */
-
-    NULL,                       /* get_in4 */
-    NULL,                       /* set_in4 */
-    NULL,                       /* get_in6 */
-    NULL,                       /* add_router */
-    NULL,                       /* get_next_hop */
-    NULL,                       /* get_status */
-    NULL,                       /* arp_lookup */
-
-    netdev_sai_update_flags,
-
-    NULL,                       /* rxq_alloc */
-    NULL,                       /* rxq_construct */
-    NULL,                       /* rxq_destruct */
-    NULL,                       /* rxq_dealloc */
-    NULL,                       /* rxq_recv */
-    NULL,                       /* rxq_wait */
-    NULL,                       /* rxq_drain */
-};
-
-static const struct netdev_class netdev_sai_internal_class = {
-    "internal",
-    NULL,                       /* init */
-    NULL,                       /* run */
-    NULL,                       /* wait */
-
-    netdev_sai_alloc,
-    netdev_sai_construct,
-    netdev_sai_destruct,
-    netdev_sai_dealloc,
-    NULL,                       /* get_config */
-    NULL,                       /* set_config */
-    netdev_sai_set_hw_intf_info,
-    netdev_sai_set_hw_intf_config,
-    NULL,                       /* get_tunnel_config */
-    NULL,                       /* build header */
-    NULL,                       /* push header */
-    NULL,                       /* pop header */
-    NULL,                       /* get_numa_id */
-    NULL,                       /* set_multiq */
-
-    NULL,                       /* send */
-    NULL,                       /* send_wait */
-
-    netdev_sai_set_etheraddr,
-    netdev_sai_get_etheraddr,
-    netdev_sai_get_mtu,
-    netdev_sai_set_mtu,
-    NULL,                       /* get_ifindex */
-    netdev_sai_get_carrier,
-    netdev_sai_get_carrier_resets,
-    NULL,                       /* set_miimon_interval */
-    netdev_sai_get_stats,
-
-    netdev_sai_get_features,
-    NULL,                       /* set_advertisements */
-
-    NULL,                       /* set_policing */
-    NULL,                       /* get_qos_types */
-    NULL,                       /* get_qos_capabilities */
-    NULL,                       /* get_qos */
-    NULL,                       /* set_qos */
-    NULL,                       /* get_queue */
-    NULL,                       /* set_queue */
-    NULL,                       /* delete_queue */
-    NULL,                       /* get_queue_stats */
-    NULL,                       /* queue_dump_start */
-    NULL,                       /* queue_dump_next */
-    NULL,                       /* queue_dump_done */
-    NULL,                       /* dump_queue_stats */
-
-    NULL,                       /* get_in4 */
-    NULL,                       /* set_in4 */
-    NULL,                       /* get_in6 */
-    NULL,                       /* add_router */
-    NULL,                       /* get_next_hop */
-    NULL,                       /* get_status */
-    NULL,                       /* arp_lookup */
-
-    netdev_sai_update_flags,
-
-    NULL,                       /* rxq_alloc */
-    NULL,                       /* rxq_construct */
-    NULL,                       /* rxq_destruct */
-    NULL,                       /* rxq_dealloc */
-    NULL,                       /* rxq_recv */
-    NULL,                       /* rxq_wait */
-    NULL,                       /* rxq_drain */
-};
-
+/**
+ * Register netdev classes - system and internal.
+ */
 void
 netdev_sai_register(void)
 {
@@ -227,14 +151,24 @@ netdev_sai_register(void)
     netdev_register_provider(&netdev_sai_internal_class);
 }
 
-sai_object_id_t
-netdev_sai_oid_get(struct netdev *netdev_)
+/**
+ * Get port label ID from netdev.
+ * @param[in] netdev_ - pointer to netdev.
+ * @return uint32_t value of port label ID.
+ */
+uint32_t
+netdev_sai_hw_id_get(struct netdev *netdev_)
 {
-    struct netdev_sai *netdev = netdev_sai_cast(netdev_);
+    struct netdev_sai *netdev = __netdev_sai_cast(netdev_);
 
-    return sai_api_hw_id2port_id(netdev->hw_id);
+    return netdev->hw_id;
 }
 
+/**
+ * Notifies openswitch when port state chenges.
+ * @param[in] oid - port object id.
+ * @param[in] link_status - port operational state.
+ */
 void
 netdev_sai_port_oper_state_changed(sai_object_id_t oid, int link_status)
 {
@@ -242,7 +176,7 @@ netdev_sai_port_oper_state_changed(sai_object_id_t oid, int link_status)
 
     LIST_FOR_EACH_SAFE(dev, next_dev, list_node, &sai_netdev_list) {
         if (dev->is_port_initialized
-            && sai_api_hw_id2port_id(dev->hw_id) == oid) {
+            && ops_sai_api_hw_id2port_id(dev->hw_id) == oid) {
             break;
         }
     }
@@ -259,21 +193,29 @@ netdev_sai_port_oper_state_changed(sai_object_id_t oid, int link_status)
     seq_change(connectivity_seq_get());
 }
 
+/*
+ * Check if netdev is of type sai_netdev.
+ */
 static inline bool
-is_sai_class(const struct netdev_class *class)
+__is_sai_class(const struct netdev_class *class)
 {
-    return class->construct == netdev_sai_construct;
+    return class->construct == __construct;
 }
 
+/*
+ * Cast openswitch netdev to sai_netdev.
+ */
 static inline struct netdev_sai *
-netdev_sai_cast(const struct netdev *netdev)
+__netdev_sai_cast(const struct netdev *netdev)
 {
-    ovs_assert(is_sai_class(netdev_get_class(netdev)));
+    NULL_PARAM_LOG_ABORT(netdev);
+
+    ovs_assert(__is_sai_class(netdev_get_class(netdev)));
     return CONTAINER_OF(netdev, struct netdev_sai, up);
 }
 
 static struct netdev *
-netdev_sai_alloc(void)
+__alloc(void)
 {
     struct netdev_sai *netdev = xzalloc(sizeof *netdev);
 
@@ -283,9 +225,9 @@ netdev_sai_alloc(void)
 }
 
 static int
-netdev_sai_construct(struct netdev *netdev_)
+__construct(struct netdev *netdev_)
 {
-    struct netdev_sai *netdev = netdev_sai_cast(netdev_);
+    struct netdev_sai *netdev = __netdev_sai_cast(netdev_);
 
     SAI_API_TRACE_FN();
 
@@ -298,9 +240,9 @@ netdev_sai_construct(struct netdev *netdev_)
 }
 
 static void
-netdev_sai_destruct(struct netdev *netdev_)
+__destruct(struct netdev *netdev_)
 {
-    struct netdev_sai *netdev = netdev_sai_cast(netdev_);
+    struct netdev_sai *netdev = __netdev_sai_cast(netdev_);
 
     SAI_API_TRACE_FN();
 
@@ -311,17 +253,20 @@ netdev_sai_destruct(struct netdev *netdev_)
 }
 
 static void
-netdev_sai_dealloc(struct netdev *netdev_)
+__dealloc(struct netdev *netdev_)
 {
-    struct netdev_sai *netdev = netdev_sai_cast(netdev_);
+    struct netdev_sai *netdev = __netdev_sai_cast(netdev_);
 
     SAI_API_TRACE_FN();
 
     free(netdev);
 }
 
+/*
+ * Read MAC address from string.
+ */
 static void
-netdev_sai_mac_read(struct eth_addr *eth_addr, const char *mac_str)
+__mac_read(struct eth_addr *eth_addr, const char *mac_str)
 {
     uint8_t *mac = eth_addr->ea;
     sscanf(mac_str, "%hhux:%hhux:%hhux:%hhux:%hhux:%hhux:",
@@ -329,21 +274,19 @@ netdev_sai_mac_read(struct eth_addr *eth_addr, const char *mac_str)
 }
 
 static int
-netdev_sai_set_hw_intf_info(struct netdev *netdev_, const struct smap *args)
+__set_hw_intf_info(struct netdev *netdev_, const struct smap *args)
 {
+    int status = 0;
     struct eth_addr mac;
-    sai_attribute_t hostif_attrib[3] = { };
-    sai_status_t status = SAI_STATUS_SUCCESS;
-    sai_object_id_t hif_id_port = SAI_NULL_OBJECT_ID;
-    struct netdev_sai *netdev = netdev_sai_cast(netdev_);
-    const struct sai_api_class *sai_api = sai_api_get_instance();
+    struct netdev_sai *netdev = __netdev_sai_cast(netdev_);
     const int hw_id =
         smap_get_int(args, INTERFACE_HW_INTF_INFO_MAP_SWITCH_INTF_ID, -1);
-    int max_speed = smap_get_int(args, INTERFACE_HW_INTF_INFO_MAP_MAX_SPEED, -1);
     /* Temporary hardcode until reading from EEPROM will be fixed. */
     const char *mac_str = "20:03:04:05:06:00";
 
     SAI_API_TRACE_FN();
+
+    NULL_PARAM_LOG_ABORT(args);
 
     ovs_mutex_lock(&netdev->mutex);
 
@@ -353,156 +296,109 @@ netdev_sai_set_hw_intf_info(struct netdev *netdev_, const struct smap *args)
     }
 
     netdev->hw_id = hw_id;
-    ovs_assert(max_speed != -1);
-    netdev->max_speed = max_speed;
-    netdev_sai_mac_read(&mac, mac_str);
+    __mac_read(&mac, mac_str);
 
-    hostif_attrib[0].id = SAI_HOSTIF_ATTR_TYPE;
-    hostif_attrib[0].value.s32 = SAI_HOSTIF_TYPE_NETDEV;
-    hostif_attrib[1].id = SAI_HOSTIF_ATTR_NAME;
-    strcpy(hostif_attrib[1].value.chardata, netdev->up.name);
-    hostif_attrib[2].id = SAI_HOSTIF_ATTR_RIF_OR_PORT_ID;
-    hostif_attrib[2].value.oid = sai_api_hw_id2port_id(netdev->hw_id);
+    status = ops_sai_hostint_netdev_create(netdev_->name, hw_id);
+    ERRNO_LOG_EXIT(status, "Failed to create port interface hw_id: %d", hw_id);
 
-    status = sai_api->host_interface_api->create_hostif(&hif_id_port, 3,
-                                                        hostif_attrib);
-    SAI_ERROR_LOG_EXIT(status, "Failed to create port interface hw_id: %d",
-                       hw_id);
+    status = ops_sai_port_config_get(hw_id, &netdev->default_config);
+    ERRNO_LOG_EXIT(status, "Failed to read default config on port: %d", hw_id);
 
-    status = netdev_sai_set_etheraddr__(netdev_, mac);
-    SAI_ERROR_EXIT(status);
+    status = __set_etheraddr_full(netdev_, mac);
+    ERRNO_EXIT(status);
 
     netdev->is_port_initialized = true;
 
 exit:
     ovs_mutex_unlock(&netdev->mutex);
-    return SAI_ERROR(status);
-}
-
-static bool
-netdev_sai_hw_intf_config_changed(const struct netdev_sai_config *old,
-                                  const struct netdev_sai_config *new)
-{
-    if (old->hw_enable != new->hw_enable ||
-        old->autoneg != new->autoneg ||
-        old->mtu != new->mtu ||
-        old->speed != new->speed) {
-        return true;
-    }
-
-    return false;
-}
-
-
-static sai_status_t
-netdev_sai_set_hw_intf_config_full(struct netdev_sai *netdev,
-                                   const struct netdev_sai_config *config)
-{
-    sai_attribute_t attr = { };
-    sai_status_t status = SAI_STATUS_SUCCESS;
-    const struct sai_api_class *sai_api = sai_api_get_instance();
-    sai_object_id_t port_id = sai_api_hw_id2port_id(netdev->hw_id);
-
-    attr.id = SAI_PORT_ATTR_AUTO_NEG_MODE;
-    attr.value.booldata = config->autoneg;
-    status = sai_api->port_api->set_port_attribute(port_id, &attr);
-    SAI_ERROR_LOG_EXIT(status, "Failed to set autoneg %d for port %d",
-                       config->autoneg, netdev->hw_id);
-
-    attr.id = SAI_PORT_ATTR_SPEED;
-    attr.value.u32 = config->speed;
-    status = sai_api->port_api->set_port_attribute(port_id, &attr);
-    SAI_ERROR_LOG_EXIT(status, "Failed to set speed %d for port %d",
-                       config->speed, netdev->hw_id);
-
-    status = netdev_sai_set_mtu__(&netdev->up, config->mtu);
-    SAI_ERROR_EXIT(status);
-
-    /* TODO: Duplex - integrate with SAI. */
-
-    netdev->config.hw_enable = config->hw_enable;
-    netdev->config.autoneg = config->autoneg;
-    netdev->config.mtu = config->mtu;
-    netdev->config.speed = config->speed;
-
-exit:
     return status;
 }
 
-static sai_status_t
-netdev_sai_set_hw_intf_config__(struct netdev_sai *netdev,
-                                const struct netdev_sai_config *config)
+/*
+ * Read autoneg value from smap arguments.
+ */
+static bool
+__args_autoneg_get(const struct smap *args, bool def)
 {
-    sai_attribute_t attr = { };
-    sai_status_t status = SAI_STATUS_SUCCESS;
-    const struct sai_api_class *sai_api = sai_api_get_instance();
-    sai_object_id_t port_id = sai_api_hw_id2port_id(netdev->hw_id);
+    const char *autoneg = smap_get(args, INTERFACE_HW_INTF_CONFIG_MAP_AUTONEG);
 
-    if (config->hw_enable) {
-        status = netdev_sai_set_hw_intf_config_full(netdev, config);
-        SAI_ERROR_EXIT(status);
+    if (autoneg == NULL) {
+        return def;
     }
 
-    attr.id = SAI_PORT_ATTR_ADMIN_STATE;
-    attr.value.booldata = config->hw_enable;
-    status = sai_api->port_api->set_port_attribute(port_id, &attr);
-    SAI_ERROR_LOG_EXIT(status, "Failed to set admin state %s for port %d",
-                       config->hw_enable ? "UP" : "DOWN", netdev->hw_id);
-
-exit:
-    return status;
+    return !strcmp(autoneg, INTERFACE_USER_CONFIG_MAP_AUTONEG_ON);
 }
 
+/*
+ * Read duplex value from smap arguments.
+ */
 static bool
-netdev_sai_args_autoneg_get(const struct smap *args)
+__args_duplex_get(const struct smap *args, bool def)
 {
-    const char *autoneg = smap_get(args,
-                                   INTERFACE_HW_INTF_CONFIG_MAP_ENABLE);
+    const char *duplex = smap_get(args, INTERFACE_HW_INTF_CONFIG_MAP_DUPLEX);
 
-    if (NULL != autoneg &&
-        !strcmp(autoneg, INTERFACE_USER_CONFIG_MAP_AUTONEG_ON)) {
-        return true;
+    if (duplex == NULL) {
+        return def;
     }
 
-    return false;
+    return !strcmp(duplex, INTERFACE_HW_INTF_CONFIG_MAP_DUPLEX_FULL);
+}
+
+/*
+ * Read pause value from smap arguments.
+ */
+static int
+__args_pause_get(const struct smap *args, bool is_tx, bool def)
+{
+    const char *pause = smap_get(args, INTERFACE_HW_INTF_CONFIG_MAP_PAUSE);
+    const char *requested_pause = is_tx ? INTERFACE_HW_INTF_CONFIG_MAP_PAUSE_TX
+        : INTERFACE_HW_INTF_CONFIG_MAP_PAUSE_RX;
+
+    if (pause == NULL) {
+        return def;
+    }
+
+    return !strcmp(pause, requested_pause) ||
+           !strcmp(pause, INTERFACE_HW_INTF_CONFIG_MAP_PAUSE_RXTX);
 }
 
 static int
-netdev_sai_set_hw_intf_config(struct netdev *netdev_, const struct smap *args)
+__set_hw_intf_config(struct netdev *netdev_, const struct smap *args)
 {
-    struct netdev_sai_config config = { };
-    sai_status_t status = SAI_STATUS_SUCCESS;
-    struct netdev_sai *netdev = netdev_sai_cast(netdev_);
+    int status = 0;
+    struct ops_sai_port_config config = { };
+    struct netdev_sai *netdev = __netdev_sai_cast(netdev_);
+    const struct ops_sai_port_config *def = &netdev->default_config;
     /* Max speed must be always present (in yaml config file). */
-    config.hw_enable = smap_get_bool(args,
-                                     INTERFACE_HW_INTF_CONFIG_MAP_ENABLE,
-                                     SAI_CONFIG_DEFAULT_HW_ENABLE);
-    config.autoneg = netdev_sai_args_autoneg_get(args);
+    config.hw_enable = smap_get_bool(args, INTERFACE_HW_INTF_CONFIG_MAP_ENABLE,
+                                     def->hw_enable);
+    config.autoneg = __args_autoneg_get(args, def->autoneg);
     config.mtu = smap_get_int(args, INTERFACE_HW_INTF_CONFIG_MAP_MTU,
-                              SAI_CONFIG_DEFAULT_MTU);
+                              def->mtu);
     config.speed = smap_get_int(args, INTERFACE_HW_INTF_CONFIG_MAP_SPEEDS,
-                                netdev->max_speed);
+                                def->speed);
+    config.full_duplex = __args_duplex_get(args, def->full_duplex);
+    config.pause_tx = __args_pause_get(args, true, def->pause_tx);
+    config.pause_rx = __args_pause_get(args, false, def->pause_rx);
 
     ovs_mutex_lock(&netdev->mutex);
 
-    if (!netdev_sai_hw_intf_config_changed(&netdev->config, &config)) {
-        goto exit;
-    }
-
-    status = netdev_sai_set_hw_intf_config__(netdev, &config);
-    SAI_ERROR_LOG_EXIT(status, "Failed to set hw interface config");
+    status = ops_sai_port_config_set(netdev->hw_id, &config, &netdev->config);
+    ERRNO_LOG_EXIT(status, "Failed to set hw interface config");
 
 exit:
     ovs_mutex_unlock(&netdev->mutex);
-    return SAI_ERROR(status);
+    return status;
 }
 
-static sai_status_t
-netdev_sai_set_etheraddr__(struct netdev *netdev,
+/*
+ * Cache MAC address.
+ */
+static int
+__set_etheraddr_full(struct netdev *netdev,
                            const struct eth_addr mac)
 {
-    sai_status_t status = SAI_STATUS_SUCCESS;
-    struct netdev_sai *dev = netdev_sai_cast(netdev);
+    struct netdev_sai *dev = __netdev_sai_cast(netdev);
 
     if (!dev->is_port_initialized) {
         goto exit;
@@ -513,30 +409,30 @@ netdev_sai_set_etheraddr__(struct netdev *netdev,
     memcpy(&dev->mac_addr, &mac, sizeof (dev->mac_addr));
 
 exit:
-    return status;
+    return 0;
 }
 
 static int
-netdev_sai_set_etheraddr(struct netdev *netdev,
+__set_etheraddr(struct netdev *netdev,
                          const struct eth_addr mac)
 {
-    sai_status_t status = SAI_STATUS_SUCCESS;
-    struct netdev_sai *dev = netdev_sai_cast(netdev);
+    int status = 0;
+    struct netdev_sai *dev = __netdev_sai_cast(netdev);
 
     SAI_API_TRACE_FN();
 
     ovs_mutex_lock(&dev->mutex);
-    status = netdev_sai_set_etheraddr__(netdev, mac);
+    status = __set_etheraddr_full(netdev, mac);
     ovs_mutex_unlock(&dev->mutex);
 
-    return SAI_ERROR(status);
+    return status;
 }
 
 static int
-netdev_sai_get_etheraddr(const struct netdev *netdev,
+__get_etheraddr(const struct netdev *netdev,
                          struct eth_addr *mac)
 {
-    struct netdev_sai *dev = netdev_sai_cast(netdev);
+    struct netdev_sai *dev = __netdev_sai_cast(netdev);
 
     SAI_API_TRACE_FN();
 
@@ -553,104 +449,60 @@ exit:
 }
 
 static int
-netdev_sai_get_mtu(const struct netdev *netdev_, int *mtup)
+__get_mtu(const struct netdev *netdev_, int *mtup)
 {
-    sai_attribute_t attr = { };
-    sai_status_t status = SAI_STATUS_SUCCESS;
-    struct netdev_sai *netdev = netdev_sai_cast(netdev_);
-    const struct sai_api_class *sai_api = sai_api_get_instance();
+    int status = 0;
+    struct netdev_sai *netdev = __netdev_sai_cast(netdev_);
 
     SAI_API_TRACE_FN();
 
     ovs_mutex_lock(&netdev->mutex);
-    if (!netdev->is_port_initialized) {
-        goto exit;
+    if (netdev->is_port_initialized) {
+        status = ops_sai_port_mtu_get(netdev->hw_id, mtup);
     }
-
-    attr.id = SAI_PORT_ATTR_MTU;
-    status = sai_api->port_api->get_port_attribute(sai_api_hw_id2port_id(netdev->hw_id),
-                                                   1, &attr);
-    SAI_ERROR_LOG_EXIT(status, "Failed to get mtu for port %d",
-                        netdev->hw_id);
-
-    *mtup = attr.value.u32;
-
-exit:
     ovs_mutex_unlock(&netdev->mutex);
-    return SAI_ERROR(status);
-}
 
-static sai_status_t
-netdev_sai_set_mtu__(const struct netdev *netdev_, int mtu)
-{
-    sai_attribute_t attr = { };
-    sai_status_t status = SAI_STATUS_SUCCESS;
-    struct netdev_sai *netdev = netdev_sai_cast(netdev_);
-    const struct sai_api_class *sai_api = sai_api_get_instance();
-
-    if (!netdev->is_port_initialized) {
-        goto exit;
-    }
-
-    attr.id = SAI_PORT_ATTR_MTU;
-    attr.value.u32 = mtu;
-    status = sai_api->port_api->set_port_attribute(sai_api_hw_id2port_id(netdev->hw_id),
-                                                   &attr);
-    SAI_ERROR_LOG_EXIT(status, "Failed to set %d mtu for port %d", mtu,
-                        netdev->hw_id);
-
-exit:
     return status;
 }
 
 static int
-netdev_sai_set_mtu(const struct netdev *netdev_, int mtu)
+__set_mtu(const struct netdev *netdev_, int mtu)
 {
-    sai_status_t status = SAI_STATUS_SUCCESS;
-    struct netdev_sai *netdev = netdev_sai_cast(netdev_);
+    int status = 0;
+    struct netdev_sai *netdev = __netdev_sai_cast(netdev_);
 
     SAI_API_TRACE_FN();
 
     ovs_mutex_lock(&netdev->mutex);
-    status = netdev_sai_set_mtu__(netdev_, mtu);
+    if (netdev->is_port_initialized) {
+        status = ops_sai_port_mtu_set(netdev->hw_id, mtu);
+    }
     ovs_mutex_unlock(&netdev->mutex);
 
-    return SAI_ERROR(status);
+    return status;
 }
 
 static int
-netdev_sai_get_carrier(const struct netdev *netdev_, bool * carrier)
+__get_carrier(const struct netdev *netdev_, bool * carrier)
 {
-    sai_attribute_t attr = { };
-    sai_status_t status = SAI_STATUS_SUCCESS;
-    struct netdev_sai *netdev = netdev_sai_cast(netdev_);
-    const struct sai_api_class *sai_api = sai_api_get_instance();
+    int status = 0;
+    struct netdev_sai *netdev = __netdev_sai_cast(netdev_);
 
     SAI_API_TRACE_FN();
 
     ovs_mutex_lock(&netdev->mutex);
-    if (!netdev->is_port_initialized) {
-        goto exit;
+    if (netdev->is_port_initialized) {
+        status = ops_sai_port_carrier_get(netdev->hw_id, carrier);
     }
-
-    attr.id = SAI_PORT_ATTR_OPER_STATUS;
-    status = sai_api->port_api->get_port_attribute(sai_api_hw_id2port_id(netdev->hw_id),
-            1, &attr);
-    SAI_ERROR_LOG_EXIT(status, "Failed to set mtu for port %d",
-                        netdev->hw_id);
-
-    *carrier = (sai_port_oper_status_t) attr.value.u32 ==
-        SAI_PORT_OPER_STATUS_UP;
-
-exit:
     ovs_mutex_unlock(&netdev->mutex);
-    return SAI_ERROR(status);
+
+    return status;
 }
 
 static long long int
-netdev_sai_get_carrier_resets(const struct netdev *netdev_)
+__get_carrier_resets(const struct netdev *netdev_)
 {
-    struct netdev_sai *netdev = netdev_sai_cast(netdev_);
+    struct netdev_sai *netdev = __netdev_sai_cast(netdev_);
 
     SAI_API_TRACE_FN();
 
@@ -658,67 +510,48 @@ netdev_sai_get_carrier_resets(const struct netdev *netdev_)
 }
 
 static int
-netdev_sai_get_stats(const struct netdev *netdev_, struct netdev_stats *stats)
+__get_stats(const struct netdev *netdev_, struct netdev_stats *stats)
 {
-    SAI_API_TRACE_NOT_IMPLEMENTED_FN();
-
-    return 0;
-}
-
-static int
-netdev_sai_get_features(const struct netdev *netdev_,
-                        enum netdev_features *current,
-                        enum netdev_features *advertised,
-                        enum netdev_features *supported,
-                        enum netdev_features *peer)
-{
-    SAI_API_TRACE_NOT_IMPLEMENTED_FN();
-
-    return 0;
-}
-
-static int
-netdev_sai_update_flags(struct netdev *netdev_,
-                        enum netdev_flags off,
-                        enum netdev_flags on, enum netdev_flags *old_flagsp)
-{
-    sai_attribute_t attr = { };
-    sai_status_t status = SAI_STATUS_SUCCESS;
-    struct netdev_sai *netdev = netdev_sai_cast(netdev_);
-    const struct sai_api_class *sai_api = sai_api_get_instance();
+    int status = 0;
+    struct netdev_sai *netdev = __netdev_sai_cast(netdev_);
 
     SAI_API_TRACE_FN();
 
     ovs_mutex_lock(&netdev->mutex);
-    if (!netdev->is_port_initialized) {
-        *old_flagsp = 0;
-        goto exit;
+    if (netdev->is_port_initialized) {
+        status = ops_sai_port_stats_get(netdev->hw_id, stats);
     }
-
-    attr.id = SAI_PORT_ATTR_ADMIN_STATE;
-    status = sai_api->port_api->get_port_attribute(sai_api_hw_id2port_id(netdev->hw_id),
-                                                   1, &attr);
-    SAI_ERROR_LOG_EXIT(status, "Failed to get admin state from port %d",
-                        netdev->hw_id);
-
-    if (attr.value.booldata) {
-        *old_flagsp |= NETDEV_UP;
-    }
-
-    if (on & NETDEV_UP) {
-        attr.value.booldata = true;
-    } else if (off & NETDEV_UP) {
-        attr.value.booldata = false;
-    } else {
-        goto exit;
-    }
-
-    status = sai_api->port_api->set_port_attribute(sai_api_hw_id2port_id(netdev->hw_id),
-                                                   &attr);
-    SAI_ERROR_LOG_EXIT(status, "Failed to set admin state on port %d",
-                        netdev->hw_id);
-
-exit:
     ovs_mutex_unlock(&netdev->mutex);
-    return SAI_ERROR(status);
+
+    return status;
+}
+
+static int
+__get_features(const struct netdev *netdev_, enum netdev_features *current,
+               enum netdev_features *advertised,
+               enum netdev_features *supported, enum netdev_features *peer)
+{
+    SAI_API_TRACE_NOT_IMPLEMENTED_FN();
+
+    return 0;
+}
+
+static int
+__update_flags(struct netdev *netdev_, enum netdev_flags off,
+               enum netdev_flags on, enum netdev_flags *old_flagsp)
+{
+    int status = 0;
+    struct netdev_sai *netdev = __netdev_sai_cast(netdev_);
+
+    SAI_API_TRACE_FN();
+
+    ovs_mutex_lock(&netdev->mutex);
+    if (netdev->is_port_initialized) {
+        status = ops_sai_port_flags_update(netdev->hw_id, off, on, old_flagsp);
+    } else {
+        *old_flagsp = 0;
+    }
+    ovs_mutex_unlock(&netdev->mutex);
+
+    return status;
 }

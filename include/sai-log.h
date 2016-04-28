@@ -9,13 +9,14 @@
 
 #include <sai.h>
 #include <errno.h>
+#include <openvswitch/vlog.h>
 
-#define SAI_ERROR(status) sai_error(status)
+#define SAI_ERROR_2_ERRNO(status) sai_error_2_errno(status)
 
 /* Requires "exit" label to be defined. */
 #define SAI_ERROR_LOG_EXIT(status, msg, args...) \
     do { \
-        if (SAI_ERROR(status)) { \
+        if (SAI_ERROR_2_ERRNO(status)) { \
             VLOG_ERR("SAI error %d " msg, status, ##args); \
             goto exit; \
         } \
@@ -24,15 +25,40 @@
 /* Requires "exit" label to be defined. */
 #define SAI_ERROR_EXIT(status) \
     do { \
-        if (SAI_ERROR(status)) { \
+        if (SAI_ERROR_2_ERRNO(status)) { \
             goto exit; \
         } \
     } while (0);
 
 #define SAI_ERROR_LOG_ABORT(status, msg, args...) \
     do { \
-        if (SAI_ERROR(status)) { \
+        if (SAI_ERROR_2_ERRNO(status)) { \
             VLOG_ERR("SAI error %d " msg, status, ##args); \
+            ovs_assert(false); \
+        } \
+    } while (0);
+
+/* Requires "exit" label to be defined. */
+#define ERRNO_LOG_EXIT(status, msg, args...) \
+    do { \
+        if (status) { \
+            VLOG_ERR("error %d " msg, status, ##args); \
+            goto exit; \
+        } \
+    } while (0);
+
+/* Requires "exit" label to be defined. */
+#define ERRNO_EXIT(status) \
+    do { \
+        if (status) { \
+            goto exit; \
+        } \
+    } while (0);
+
+#define NULL_PARAM_LOG_ABORT(param) \
+    do { \
+        if (NULL == (param)) { \
+            VLOG_ERR("Got null param " #param ". Aborting."); \
             ovs_assert(false); \
         } \
     } while (0);
@@ -43,7 +69,7 @@
     VLOG_DBG("Function %s is not yet implemented", __FUNCTION__)
 
 static inline int
-sai_error(sai_status_t status)
+sai_error_2_errno(sai_status_t status)
 {
     switch (status) {
         case SAI_STATUS_SUCCESS: return 0;

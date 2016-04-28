@@ -12,14 +12,17 @@
 #include <ofproto/ofproto-provider.h>
 #include <ofproto/bond.h>
 #include <ofproto/tunnel.h>
-#include <openvswitch/vlog.h>
 
 #include <vswitch-idl.h>
 #include <openswitch-idl.h>
 
+#include <sai-common.h>
 #include <sai-netdev.h>
 #include <sai-api-class.h>
 #include <sai-log.h>
+#include <sai-port.h>
+#include <sai-vlan.h>
+#include <sai-host-intf.h>
 
 #define SAI_INTERFACE_TYPE_SYSTEM "system"
 #define SAI_INTERFACE_TYPE_VRF "vrf"
@@ -40,7 +43,6 @@ struct ofport_sai {
     struct ofport up;
     struct ofbundle_sai *bundle;        /* Bundle that contains this port */
     struct ovs_list bundle_node;        /* In struct ofbundle's "ports" list. */
-    sai_object_id_t port_oid;   /* SAI port ID */
 };
 
 struct ofbundle_sai {
@@ -72,224 +74,196 @@ struct port_dump_state {
 /* All existing ofproto provider instances, indexed by ->up.name. */
 static struct hmap all_ofproto_sai = HMAP_INITIALIZER(&all_ofproto_sai);
 
-static const sai_hostif_trap_id_t hostif_traps[] = {
-    SAI_HOSTIF_TRAP_ID_LLDP,
-};
+static const unsigned long empty_trunks[BITMAP_N_LONGS(VLAN_BITMAP_SIZE)];
 
-static void ofproto_sai_init(const struct shash *);
-static void ofproto_sai_enumerate_types(struct sset *);
-static int ofproto_sai_enumerate_names(const char *, struct sset *);
-static int ofproto_sai_del(const char *, const char *);
-static const char *ofproto_sai_port_open_type(const char *, const char *);
-static struct ofproto *ofproto_sai_alloc(void);
-static inline struct ofproto_sai *ofproto_sai_cast(const struct ofproto *);
-static int ofproto_sai_construct(struct ofproto *);
-static void ofproto_sai_destruct(struct ofproto *);
-static void ofproto_sai_dealloc(struct ofproto *);
-static inline struct ofport_sai *ofport_sai_cast(const struct ofport *);
-static struct ofport *ofproto_sai_port_alloc(void);
-static int ofproto_sai_port_construct(struct ofport *);
-static void ofproto_sai_port_destruct(struct ofport *);
-static void ofproto_sai_port_dealloc(struct ofport *);
-static void ofproto_sai_port_reconfigured(struct ofport *,
-                                          enum ofputil_port_config);
-static int ofproto_sai_port_query_by_name(const struct ofproto *, const char *,
-                                          struct ofproto_port *);
-static struct ofport_sai *ofproto_sai_get_ofp_port(const struct ofproto_sai *,
-                                                   ofp_port_t);
-static int ofproto_sai_port_add(struct ofproto *, struct netdev *netdev);
-static int ofproto_sai_port_del(struct ofproto *, ofp_port_t);
-static int ofproto_sai_port_get_stats(const struct ofport *,
-                                      struct netdev_stats *);
-static int ofproto_sai_port_dump_start(const struct ofproto *, void **);
-static int ofproto_sai_port_dump_next(const struct ofproto *, void *,
-                                      struct ofproto_port *);
-static int ofproto_sai_port_dump_done(const struct ofproto *, void *);
-static struct rule *ofproto_sai_rule_alloc(void);
-static void ofproto_sai_rule_dealloc(struct rule *);
-static enum ofperr ofproto_sai_rule_construct(struct rule *);
-static void ofproto_sai_rule_insert(struct rule *, struct rule *, bool);
-static void ofproto_sai_rule_delete(struct rule *);
-static void ofproto_sai_rule_destruct(struct rule *);
-static void ofproto_sai_rule_get_stats(struct rule *, uint64_t *, uint64_t *,
-                                       long long int *);
-static enum ofperr ofproto_sai_rule_execute(struct rule *, const struct flow *,
-                                            struct dp_packet *);
-static bool ofproto_sai_set_frag_handling(struct ofproto *,
-                                          enum ofp_config_flags);
-static enum ofperr ofproto_sai_packet_out(struct ofproto *, struct dp_packet *,
-                                          const struct flow *,
-                                          const struct ofpact *, size_t);
-static sai_status_t ofbundle_sai_port_vlan_set(const struct ofport_sai *,
-                                               sai_vlan_id_t,
-                                               sai_vlan_tagging_mode_t, bool);
-static sai_status_t ofbundle_sai_port_vlan_add(const struct ofport_sai *,
-                                               sai_vlan_id_t,
-                                               sai_vlan_tagging_mode_t);
-static sai_status_t ofbundle_sai_port_vlan_del(const struct ofport_sai *,
-                                               sai_vlan_id_t);
-static sai_status_t ofbundle_sai_port_vlan_add(const struct ofport_sai *port,
-                                               sai_vlan_id_t vid,
-                                               sai_vlan_tagging_mode_t mode);
-static sai_status_t ofbundle_sai_port_trunks_set(const struct ofport_sai *,
-                                                 unsigned long *,
-                                                 sai_vlan_tagging_mode_t,
-                                                 bool);
-static sai_status_t ofbundle_sai_port_trunks_add(struct ofport_sai *,
-                                                 unsigned long *,
-                                                 sai_vlan_tagging_mode_t);
-static sai_status_t ofbundle_sai_port_trunks_del(struct ofport_sai *,
-                                                 unsigned long *);
-static sai_vlan_tagging_mode_t ofbundle_sai_vlan_mode(enum port_vlan_mode,
-                                                      bool);
-static sai_status_t ofbundle_sai_port_pvid_vlan_del(struct ofport_sai *);
-static sai_status_t ofbundle_sai_port_add(struct ofbundle_sai *,
-                                          struct ofport_sai *);
-static sai_status_t ofbundle_sai_port_del(struct ofport_sai *);
-static void ofbundle_sai_trunks_realloc(struct ofbundle_sai *,
-                                        const unsigned long *);
-static sai_status_t ofbundle_sai_vlan_reconfigure(struct ofbundle_sai *,
-                                                  const struct
-                                                  ofproto_bundle_settings *);
-static sai_status_t ofbundle_sai_ports_reconfigure(struct ofbundle_sai *,
-                                                   const struct
-                                                   ofproto_bundle_settings *);
-static void ofbundle_sai_rename(struct ofbundle_sai *, const char *);
-static struct ofbundle_sai *ofbundle_sai_create(struct ofproto_sai *, void *,
-                                                const struct
-                                                ofproto_bundle_settings *);
-static void ofbundle_sai_destroy(struct ofbundle_sai *);
-static struct ofbundle_sai *ofbundle_sai_lookup(struct ofproto_sai *, void *);
-static int ofproto_sai_bundle_set(struct ofproto *, void *,
+static void __init(const struct shash *);
+static void __enumerate_types(struct sset *);
+static int __enumerate_names(const char *, struct sset *);
+static int __del(const char *, const char *);
+static const char *__port_open_type(const char *, const char *);
+static struct ofproto *__alloc(void);
+static inline struct ofproto_sai *__ofproto_sai_cast(const struct ofproto *);
+static int __construct(struct ofproto *);
+static void __destruct(struct ofproto *);
+static void __sai_dealloc(struct ofproto *);
+static inline struct ofport_sai *__ofport_sai_cast(const struct ofport *);
+static struct ofport *__port_alloc(void);
+static int __port_construct(struct ofport *);
+static void __port_destruct(struct ofport *);
+static void __port_dealloc(struct ofport *);
+static void __port_reconfigured(struct ofport *, enum ofputil_port_config);
+static int __port_query_by_name(const struct ofproto *, const char *,
+                                struct ofproto_port *);
+static struct ofport_sai *__get_ofp_port(const struct ofproto_sai *,
+                                         ofp_port_t);
+static int __port_add(struct ofproto *, struct netdev *netdev);
+static int __port_del(struct ofproto *, ofp_port_t);
+static int __port_get_stats(const struct ofport *, struct netdev_stats *);
+static int __port_dump_start(const struct ofproto *, void **);
+static int __port_dump_next(const struct ofproto *, void *,
+                            struct ofproto_port *);
+static int __port_dump_done(const struct ofproto *, void *);
+static struct rule *__rule_alloc(void);
+static void __rule_dealloc(struct rule *);
+static enum ofperr __rule_construct(struct rule *);
+static void __rule_insert(struct rule *, struct rule *, bool);
+static void __rule_delete(struct rule *);
+static void __rule_destruct(struct rule *);
+static void __rule_get_stats(struct rule *, uint64_t *, uint64_t *,
+                             long long int *);
+static enum ofperr __rule_execute(struct rule *, const struct flow *,
+                                  struct dp_packet *);
+static bool __set_frag_handling(struct ofproto *, enum ofp_config_flags);
+static enum ofperr __packet_out(struct ofproto *, struct dp_packet *,
+                                const struct flow *, const struct ofpact *,
+                                size_t);
+static int __ofbundle_port_add(struct ofbundle_sai *, struct ofport_sai *);
+static int __ofbundle_port_del(struct ofport_sai *);
+static void __trunks_realloc(struct ofbundle_sai *, const unsigned long *);
+static int __native_tagged_vlan_set(int, uint32_t, bool);
+static int __vlan_reconfigure(struct ofbundle_sai *,
+                              const struct ofproto_bundle_settings *);
+static int __ofbundle_ports_reconfigure(struct ofbundle_sai *,
+                                        const struct
+                                        ofproto_bundle_settings *);
+static void __ofbundle_rename(struct ofbundle_sai *, const char *);
+static struct ofbundle_sai *__ofbundle_create(struct ofproto_sai *, void *,
+                                              const struct
+                                              ofproto_bundle_settings *);
+static void __ofbundle_destroy(struct ofbundle_sai *);
+static struct ofbundle_sai *__ofbundle_lookup(struct ofproto_sai *, void *);
+static int __bundle_set(struct ofproto *, void *,
                                   const struct ofproto_bundle_settings *);
-static void ofproto_sai_bundle_remove(struct ofport *);
-static int ofproto_sai_bundle_get(struct ofproto *, void *, int *);
-static int ofproto_sai_set_vlan(struct ofproto *, int, bool);
-static inline struct ofproto_sai_group *ofproto_sai_group_cast(const struct
-                                                               ofgroup *);
-static struct ofgroup *ofproto_sai_group_alloc(void);
-static enum ofperr ofproto_sai_group_construct(struct ofgroup *);
-static void ofproto_sai_group_destruct(struct ofgroup *);
-static void ofproto_sai_group_dealloc(struct ofgroup *);
-static enum ofperr ofproto_sai_group_modify(struct ofgroup *);
-static enum ofperr ofproto_sai_group_get_stats(const struct ofgroup *,
-                                               struct ofputil_group_stats *);
-static const char *ofproto_sai_get_datapath_version(const struct ofproto *);
-static int ofproto_sai_add_l3_host_entry(const struct ofproto *, void *, bool,
-                                         char *, char *, int *);
-static int ofproto_sai_delete_l3_host_entry(const struct ofproto *, void *,
-                                            bool, char *, int *);
-static int ofproto_sai_get_l3_host_hit_bit(const struct ofproto *, void *,
-                                           bool, char *, bool *);
-static int ofproto_sai_l3_route_action(const struct ofproto *,
-                                       enum ofproto_route_action,
-                                       struct ofproto_route *);
-static int ofproto_sai_l3_ecmp_set(const struct ofproto *, bool);
-static int ofproto_sai_l3_ecmp_hash_set(const struct ofproto *, unsigned int,
-                                        bool);
-static int ofproto_sai_run(struct ofproto *);
-static void ofproto_sai_wait(struct ofproto *);
-static void ofproto_sai_set_tables_version(struct ofproto *, cls_version_t);
+static void __bundle_remove(struct ofport *);
+static int __bundle_get(struct ofproto *, void *, int *);
+static int __set_vlan(struct ofproto *, int, bool);
+static inline struct ofproto_sai_group *__ofproto_sai_group_cast(const struct
+                                                                 ofgroup *);
+static struct ofgroup *__group_alloc(void);
+static enum ofperr __group_construct(struct ofgroup *);
+static void __group_destruct(struct ofgroup *);
+static void __group_dealloc(struct ofgroup *);
+static enum ofperr __group_modify(struct ofgroup *);
+static enum ofperr __group_get_stats(const struct ofgroup *,
+                                     struct ofputil_group_stats *);
+static const char *__get_datapath_version(const struct ofproto *);
+static int __add_l3_host_entry(const struct ofproto *, void *, bool, char *,
+                               char *, int *);
+static int __delete_l3_host_entry(const struct ofproto *, void *, bool, char *,
+                                  int *);
+static int __get_l3_host_hit_bit(const struct ofproto *, void *, bool, char *,
+                                 bool *);
+static int __l3_route_action(const struct ofproto *, enum ofproto_route_action,
+                             struct ofproto_route *);
+static int __l3_ecmp_set(const struct ofproto *, bool);
+static int __l3_ecmp_hash_set(const struct ofproto *, unsigned int, bool);
+static int __run(struct ofproto *);
+static void __wait(struct ofproto *);
+static void __set_tables_version(struct ofproto *, cls_version_t);
 
 const struct ofproto_class ofproto_sai_class = {
-    .init                    = ofproto_sai_init,
-    .enumerate_types         = ofproto_sai_enumerate_types,
-    .enumerate_names         = ofproto_sai_enumerate_names,
-    .del                     = ofproto_sai_del,
-    .port_open_type          = ofproto_sai_port_open_type,
-    .type_run                = NULL,
-    .type_wait               = NULL,
-    .alloc                   = ofproto_sai_alloc,
-    .construct               = ofproto_sai_construct,
-    .destruct                = ofproto_sai_destruct,
-    .dealloc                 = ofproto_sai_dealloc,
-    .run                     = ofproto_sai_run,
-    .wait                    = ofproto_sai_wait,
-    .get_memory_usage        = NULL,
-    .type_get_memory_usage   = NULL,
-    .flush                   = NULL,
-    .query_tables            = NULL,
-    .set_tables_version      = ofproto_sai_set_tables_version,
-    .port_alloc              = ofproto_sai_port_alloc,
-    .port_construct          = ofproto_sai_port_construct,
-    .port_destruct           = ofproto_sai_port_destruct,
-    .port_dealloc            = ofproto_sai_port_dealloc,
-    .port_modified           = NULL,
-    .port_reconfigured       = ofproto_sai_port_reconfigured,
-    .port_query_by_name      = ofproto_sai_port_query_by_name,
-    .port_add                = ofproto_sai_port_add,
-    .port_del                = ofproto_sai_port_del,
-    .port_get_stats          = ofproto_sai_port_get_stats,
-    .port_dump_start         = ofproto_sai_port_dump_start,
-    .port_dump_next          = ofproto_sai_port_dump_next,
-    .port_dump_done          = ofproto_sai_port_dump_done,
-    .port_poll               = NULL,
-    .port_poll_wait          = NULL,
-    .port_is_lacp_current    = NULL,
-    .port_get_lacp_stats     = NULL,
-    .rule_construct          = NULL,
-    .rule_alloc              = ofproto_sai_rule_alloc,
-    .rule_construct          = ofproto_sai_rule_construct,
-    .rule_insert             = ofproto_sai_rule_insert,
-    .rule_delete             = ofproto_sai_rule_delete,
-    .rule_destruct           = ofproto_sai_rule_destruct,
-    .rule_dealloc            = ofproto_sai_rule_dealloc,
-    .rule_get_stats          = ofproto_sai_rule_get_stats,
-    .rule_execute            = ofproto_sai_rule_execute,
-    .set_frag_handling       = ofproto_sai_set_frag_handling,
-    .packet_out              = ofproto_sai_packet_out,
-    .set_netflow             = NULL,
-    .get_netflow_ids         = NULL,
-    .set_sflow               = NULL,
-    .set_ipfix               = NULL,
-    .set_cfm                 = NULL,
-    .cfm_status_changed      = NULL,
-    .get_cfm_status          = NULL,
-    .set_bfd                 = NULL,
-    .bfd_status_changed      = NULL,
-    .get_bfd_status          = NULL,
-    .set_stp                 = NULL,
-    .get_stp_status          = NULL,
-    .set_stp_port            = NULL,
-    .get_stp_port_status     = NULL,
-    .get_stp_port_stats      = NULL,
-    .set_rstp                = NULL,
-    .get_rstp_status         = NULL,
-    .set_rstp_port           = NULL,
-    .get_rstp_port_status    = NULL,
-    .set_queues              = NULL,
-    .bundle_set              = ofproto_sai_bundle_set,
-    .bundle_remove           = ofproto_sai_bundle_remove,
-    .bundle_get              = ofproto_sai_bundle_get,
-    .set_vlan                = ofproto_sai_set_vlan,
-    .mirror_set              = NULL,
-    .mirror_get_stats        = NULL,
-    .set_flood_vlans         = NULL,
-    .is_mirror_output_bundle = NULL,
-    .forward_bpdu_changed    = NULL,
-    .set_mac_table_config    = NULL,
-    .set_mcast_snooping      = NULL,
-    .set_mcast_snooping_port = NULL,
-    .set_realdev             = NULL,
-    .meter_get_features      = NULL,
-    .meter_set               = NULL,
-    .meter_get               = NULL,
-    .meter_del               = NULL,
-    .group_alloc             = ofproto_sai_group_alloc,
-    .group_construct         = ofproto_sai_group_construct,
-    .group_destruct          = ofproto_sai_group_destruct,
-    .group_dealloc           = ofproto_sai_group_dealloc,
-    .group_modify            = ofproto_sai_group_modify,
-    .group_get_stats         = ofproto_sai_group_get_stats,
-    .get_datapath_version    = ofproto_sai_get_datapath_version,
-    .add_l3_host_entry       = ofproto_sai_add_l3_host_entry,
-    .delete_l3_host_entry    = ofproto_sai_delete_l3_host_entry,
-    .get_l3_host_hit         = ofproto_sai_get_l3_host_hit_bit,
-    .l3_route_action         = ofproto_sai_l3_route_action,
-    .l3_ecmp_set             = ofproto_sai_l3_ecmp_set,
-    .l3_ecmp_hash_set        = ofproto_sai_l3_ecmp_hash_set,
+    PROVIDER_INIT_GENERIC(init,                  __init)
+    PROVIDER_INIT_GENERIC(enumerate_types,       __enumerate_types)
+    PROVIDER_INIT_GENERIC(enumerate_names,       __enumerate_names)
+    PROVIDER_INIT_GENERIC(del,                   __del)
+    PROVIDER_INIT_GENERIC(port_open_type,        __port_open_type)
+    PROVIDER_INIT_GENERIC(type_run,              NULL)
+    PROVIDER_INIT_GENERIC(type_wait,             NULL)
+    PROVIDER_INIT_GENERIC(alloc,                 __alloc)
+    PROVIDER_INIT_GENERIC(construct,             __construct)
+    PROVIDER_INIT_GENERIC(destruct,              __destruct)
+    PROVIDER_INIT_GENERIC(dealloc,               __sai_dealloc)
+    PROVIDER_INIT_GENERIC(run,                   __run)
+    PROVIDER_INIT_GENERIC(wait,                  __wait)
+    PROVIDER_INIT_GENERIC(get_memory_usage,      NULL)
+    PROVIDER_INIT_GENERIC(type_get_memory_usage, NULL)
+    PROVIDER_INIT_GENERIC(flush,                 NULL)
+    PROVIDER_INIT_GENERIC(query_tables,          NULL)
+    PROVIDER_INIT_GENERIC(set_tables_version,    __set_tables_version)
+    PROVIDER_INIT_GENERIC(port_alloc,            __port_alloc)
+    PROVIDER_INIT_GENERIC(port_construct,        __port_construct)
+    PROVIDER_INIT_GENERIC(port_destruct,         __port_destruct)
+    PROVIDER_INIT_GENERIC(port_dealloc,          __port_dealloc)
+    PROVIDER_INIT_GENERIC(port_modified,         NULL)
+    PROVIDER_INIT_GENERIC(port_reconfigured,     __port_reconfigured)
+    PROVIDER_INIT_GENERIC(port_query_by_name,    __port_query_by_name)
+    PROVIDER_INIT_GENERIC(port_add,              __port_add)
+    PROVIDER_INIT_GENERIC(port_del,              __port_del)
+    PROVIDER_INIT_GENERIC(port_get_stats,        __port_get_stats)
+    PROVIDER_INIT_GENERIC(port_dump_start,       __port_dump_start)
+    PROVIDER_INIT_GENERIC(port_dump_next,        __port_dump_next)
+    PROVIDER_INIT_GENERIC(port_dump_done,        __port_dump_done)
+    PROVIDER_INIT_GENERIC(port_poll,             NULL)
+    PROVIDER_INIT_GENERIC(port_poll_wait,        NULL)
+    PROVIDER_INIT_GENERIC(port_is_lacp_current,  NULL)
+    PROVIDER_INIT_GENERIC(port_get_lacp_stats,   NULL)
+    PROVIDER_INIT_GENERIC(rule_construct,        NULL)
+    PROVIDER_INIT_GENERIC(rule_alloc,            __rule_alloc)
+    PROVIDER_INIT_GENERIC(rule_construct,        __rule_construct)
+    PROVIDER_INIT_GENERIC(rule_insert,           __rule_insert)
+    PROVIDER_INIT_GENERIC(rule_delete,           __rule_delete)
+    PROVIDER_INIT_GENERIC(rule_destruct,         __rule_destruct)
+    PROVIDER_INIT_GENERIC(rule_dealloc,          __rule_dealloc)
+    PROVIDER_INIT_GENERIC(rule_get_stats,        __rule_get_stats)
+    PROVIDER_INIT_GENERIC(rule_execute,          __rule_execute)
+    PROVIDER_INIT_GENERIC(set_frag_handling,     __set_frag_handling)
+    PROVIDER_INIT_GENERIC(packet_out,            __packet_out)
+    PROVIDER_INIT_GENERIC(set_netflow,           NULL)
+    PROVIDER_INIT_GENERIC(get_netflow_ids,       NULL)
+    PROVIDER_INIT_GENERIC(set_sflow,             NULL)
+    PROVIDER_INIT_GENERIC(set_ipfix,             NULL)
+    PROVIDER_INIT_GENERIC(set_cfm,               NULL)
+    PROVIDER_INIT_GENERIC(cfm_status_changed,    NULL)
+    PROVIDER_INIT_GENERIC(get_cfm_status,        NULL)
+    PROVIDER_INIT_GENERIC(set_bfd,               NULL)
+    PROVIDER_INIT_GENERIC(bfd_status_changed,    NULL)
+    PROVIDER_INIT_GENERIC(get_bfd_status,        NULL)
+    PROVIDER_INIT_GENERIC(set_stp,               NULL)
+    PROVIDER_INIT_GENERIC(get_stp_status,        NULL)
+    PROVIDER_INIT_GENERIC(set_stp_port,          NULL)
+    PROVIDER_INIT_GENERIC(get_stp_port_status,   NULL)
+    PROVIDER_INIT_GENERIC(get_stp_port_stats,    NULL)
+    PROVIDER_INIT_GENERIC(set_rstp,              NULL)
+    PROVIDER_INIT_GENERIC(get_rstp_status,       NULL)
+    PROVIDER_INIT_GENERIC(set_rstp_port,         NULL)
+    PROVIDER_INIT_GENERIC(get_rstp_port_status,  NULL)
+    PROVIDER_INIT_GENERIC(set_queues,            NULL)
+    PROVIDER_INIT_GENERIC(bundle_set,            __bundle_set)
+    PROVIDER_INIT_GENERIC(bundle_remove,         __bundle_remove)
+    PROVIDER_INIT_OPS_SPECIFIC(bundle_get,       __bundle_get)
+    PROVIDER_INIT_OPS_SPECIFIC(set_vlan,         __set_vlan)
+    PROVIDER_INIT_GENERIC(mirror_set,            NULL)
+    PROVIDER_INIT_GENERIC(mirror_get_stats,      NULL)
+    PROVIDER_INIT_GENERIC(set_flood_vlans,       NULL)
+    PROVIDER_INIT_GENERIC(is_mirror_output_bundle, NULL)
+    PROVIDER_INIT_GENERIC(forward_bpdu_changed,  NULL)
+    PROVIDER_INIT_GENERIC(set_mac_table_config,  NULL)
+    PROVIDER_INIT_GENERIC(set_mcast_snooping,    NULL)
+    PROVIDER_INIT_GENERIC(set_mcast_snooping_port, NULL)
+    PROVIDER_INIT_GENERIC(set_realdev,           NULL)
+    PROVIDER_INIT_GENERIC(meter_get_features,    NULL)
+    PROVIDER_INIT_GENERIC(meter_set,             NULL)
+    PROVIDER_INIT_GENERIC(meter_get,             NULL)
+    PROVIDER_INIT_GENERIC(meter_del,             NULL)
+    PROVIDER_INIT_GENERIC(group_alloc,           __group_alloc)
+    PROVIDER_INIT_GENERIC(group_construct,       __group_construct)
+    PROVIDER_INIT_GENERIC(group_destruct,        __group_destruct)
+    PROVIDER_INIT_GENERIC(group_dealloc,         __group_dealloc)
+    PROVIDER_INIT_GENERIC(group_modify,          __group_modify)
+    PROVIDER_INIT_GENERIC(group_get_stats,       __group_get_stats)
+    PROVIDER_INIT_GENERIC(get_datapath_version,  __get_datapath_version)
+    PROVIDER_INIT_OPS_SPECIFIC(add_l3_host_entry, __add_l3_host_entry)
+    PROVIDER_INIT_OPS_SPECIFIC(delete_l3_host_entry, __delete_l3_host_entry)
+    PROVIDER_INIT_OPS_SPECIFIC(get_l3_host_hit,  __get_l3_host_hit_bit)
+    PROVIDER_INIT_OPS_SPECIFIC(l3_route_action,  __l3_route_action)
+    PROVIDER_INIT_OPS_SPECIFIC(l3_ecmp_set,      __l3_ecmp_set)
+    PROVIDER_INIT_OPS_SPECIFIC(l3_ecmp_hash_set, __l3_ecmp_hash_set)
 };
 
+
+/**
+ * Regster ofproto provider.
+ */
 void
 ofproto_sai_register(void)
 {
@@ -297,33 +271,16 @@ ofproto_sai_register(void)
 }
 
 static void
-ofproto_sai_init(const struct shash *iface_hints)
+__init(const struct shash *iface_hints)
 {
-    sai_attribute_t attr = { };
-    sai_status_t status = SAI_STATUS_SUCCESS;
-    const struct sai_api_class *sai_api = sai_api_get_instance();
-
     SAI_API_TRACE_FN();
 
-    for (int i = 0; i < ARRAY_SIZE(hostif_traps); ++i) {
-        attr.id = SAI_HOSTIF_TRAP_ATTR_PACKET_ACTION;
-        attr.value.s32 = SAI_PACKET_ACTION_TRAP;
-        status = sai_api->host_interface_api->set_trap_attribute(hostif_traps[i],
-                                                                &attr);
-        SAI_ERROR_LOG_ABORT(status, "Failed to set trap packet action %d",
-                            hostif_traps[i]);
-
-        attr.id = SAI_HOSTIF_TRAP_ATTR_TRAP_CHANNEL;
-        attr.value.s32 = SAI_HOSTIF_TRAP_CHANNEL_NETDEV;
-        status = sai_api->host_interface_api->set_trap_attribute(hostif_traps[i],
-                                                                 &attr);
-        SAI_ERROR_LOG_ABORT(status, "Failed to set trap channel %d",
-                            hostif_traps[i]);
-    }
+    ops_sai_api_init();
+    ops_sai_hostint_traps_register();
 }
 
 static void
-ofproto_sai_enumerate_types(struct sset *types)
+__enumerate_types(struct sset *types)
 {
     SAI_API_TRACE_FN();
 
@@ -333,7 +290,7 @@ ofproto_sai_enumerate_types(struct sset *types)
 }
 
 static int
-ofproto_sai_enumerate_names(const char *type, struct sset *names)
+__enumerate_names(const char *type, struct sset *names)
 {
     struct ofproto_sai *ofproto;
 
@@ -351,15 +308,17 @@ ofproto_sai_enumerate_names(const char *type, struct sset *names)
 }
 
 static int
-ofproto_sai_del(const char *type, const char *name)
+__del(const char *type, const char *name)
 {
     SAI_API_TRACE_FN();
+
+    ops_sai_api_uninit();
 
     return 0;
 }
 
 static const char *
-ofproto_sai_port_open_type(const char *datapath_type, const char *port_type)
+__port_open_type(const char *datapath_type, const char *port_type)
 {
     SAI_API_TRACE_FN();
 
@@ -374,7 +333,7 @@ ofproto_sai_port_open_type(const char *datapath_type, const char *port_type)
 }
 
 static struct ofproto *
-ofproto_sai_alloc(void)
+__alloc(void)
 {
     struct ofproto_sai *ofproto = xzalloc(sizeof *ofproto);
 
@@ -383,17 +342,20 @@ ofproto_sai_alloc(void)
     return &ofproto->up;
 }
 
+/*
+ * Cast netdev ofproto to ofproto_sai.
+ */
 static inline struct ofproto_sai *
-ofproto_sai_cast(const struct ofproto *ofproto)
+__ofproto_sai_cast(const struct ofproto *ofproto)
 {
     ovs_assert(ofproto->ofproto_class == &ofproto_sai_class);
     return CONTAINER_OF(ofproto, struct ofproto_sai, up);
 }
 
 static int
-ofproto_sai_construct(struct ofproto *ofproto_)
+__construct(struct ofproto *ofproto_)
 {
-    struct ofproto_sai *ofproto = ofproto_sai_cast(ofproto_);
+    struct ofproto_sai *ofproto = __ofproto_sai_cast(ofproto_);
     int error = 0;
 
     SAI_API_TRACE_FN();
@@ -418,9 +380,9 @@ ofproto_sai_construct(struct ofproto *ofproto_)
 }
 
 static void
-ofproto_sai_destruct(struct ofproto *ofproto_ OVS_UNUSED)
+__destruct(struct ofproto *ofproto_ OVS_UNUSED)
 {
-    struct ofproto_sai *ofproto = ofproto_sai_cast(ofproto_);
+    struct ofproto_sai *ofproto = __ofproto_sai_cast(ofproto_);
 
     SAI_API_TRACE_FN();
 
@@ -434,9 +396,9 @@ ofproto_sai_destruct(struct ofproto *ofproto_ OVS_UNUSED)
 }
 
 static void
-ofproto_sai_dealloc(struct ofproto *ofproto_)
+__sai_dealloc(struct ofproto *ofproto_)
 {
-    struct ofproto_sai *ofproto = ofproto_sai_cast(ofproto_);
+    struct ofproto_sai *ofproto = __ofproto_sai_cast(ofproto_);
 
     SAI_API_TRACE_FN();
 
@@ -444,13 +406,13 @@ ofproto_sai_dealloc(struct ofproto *ofproto_)
 }
 
 static inline struct ofport_sai *
-ofport_sai_cast(const struct ofport *ofport)
+__ofport_sai_cast(const struct ofport *ofport)
 {
     return ofport ? CONTAINER_OF(ofport, struct ofport_sai, up) : NULL;
 }
 
 static struct ofport *
-ofproto_sai_port_alloc(void)
+__port_alloc(void)
 {
     struct ofport_sai *port = xzalloc(sizeof *port);
 
@@ -460,32 +422,23 @@ ofproto_sai_port_alloc(void)
 }
 
 static int
-ofproto_sai_port_construct(struct ofport *port_)
+__port_construct(struct ofport *port_)
 {
-    struct ofport_sai *port = ofport_sai_cast(port_);
-
     SAI_API_TRACE_FN();
-
-    if (!strcmp(port->up.netdev->name, DEFAULT_BRIDGE_NAME)) {
-        return 0;
-    }
-
-    port->port_oid = netdev_sai_oid_get(port->up.netdev);
-    ofbundle_sai_port_pvid_vlan_del(port);
 
     return 0;
 }
 
 static void
-ofproto_sai_port_destruct(struct ofport *port_ OVS_UNUSED)
+__port_destruct(struct ofport *port_ OVS_UNUSED)
 {
     SAI_API_TRACE_FN();
 }
 
 static void
-ofproto_sai_port_dealloc(struct ofport *port_)
+__port_dealloc(struct ofport *port_)
 {
-    struct ofport_sai *port = ofport_sai_cast(port_);
+    struct ofport_sai *port = __ofport_sai_cast(port_);
 
     SAI_API_TRACE_FN();
 
@@ -493,8 +446,7 @@ ofproto_sai_port_dealloc(struct ofport *port_)
 }
 
 static void
-ofproto_sai_port_reconfigured(struct ofport *port_,
-                              enum ofputil_port_config old_config)
+__port_reconfigured(struct ofport *port_, enum ofputil_port_config old_config)
 {
     SAI_API_TRACE_FN();
 
@@ -502,13 +454,12 @@ ofproto_sai_port_reconfigured(struct ofport *port_,
 }
 
 static int
-ofproto_sai_port_query_by_name(const struct ofproto *ofproto_,
-                               const char *devname,
-                               struct ofproto_port *ofproto_port)
+__port_query_by_name(const struct ofproto *ofproto_, const char *devname,
+                     struct ofproto_port *ofproto_port)
 {
     SAI_API_TRACE_FN();
 
-    struct ofproto_sai *ofproto = ofproto_sai_cast(ofproto_);
+    struct ofproto_sai *ofproto = __ofproto_sai_cast(ofproto_);
     const char *type = netdev_get_type_from_name(devname);
 
     if (type) {
@@ -525,18 +476,17 @@ ofproto_sai_port_query_by_name(const struct ofproto *ofproto_,
 }
 
 static struct ofport_sai *
-ofproto_sai_get_ofp_port(const struct ofproto_sai *ofproto,
-                         ofp_port_t ofp_port)
+__get_ofp_port(const struct ofproto_sai *ofproto, ofp_port_t ofp_port)
 {
     struct ofport *ofport = ofproto_get_port(&ofproto->up, ofp_port);
 
-    return ofport ? ofport_sai_cast(ofport) : NULL;
+    return ofport ? __ofport_sai_cast(ofport) : NULL;
 }
 
 static int
-ofproto_sai_port_add(struct ofproto *ofproto_, struct netdev *netdev)
+__port_add(struct ofproto *ofproto_, struct netdev *netdev)
 {
-    struct ofproto_sai *ofproto = ofproto_sai_cast(ofproto_);
+    struct ofproto_sai *ofproto = __ofproto_sai_cast(ofproto_);
 
     SAI_API_TRACE_FN();
 
@@ -545,10 +495,10 @@ ofproto_sai_port_add(struct ofproto *ofproto_, struct netdev *netdev)
 }
 
 static int
-ofproto_sai_port_del(struct ofproto *ofproto_, ofp_port_t ofp_port)
+__port_del(struct ofproto *ofproto_, ofp_port_t ofp_port)
 {
-    struct ofproto_sai *ofproto = ofproto_sai_cast(ofproto_);
-    struct ofport_sai *ofport = ofproto_sai_get_ofp_port(ofproto, ofp_port);
+    struct ofproto_sai *ofproto = __ofproto_sai_cast(ofproto_);
+    struct ofport_sai *ofport = __get_ofp_port(ofproto, ofp_port);
 
     SAI_API_TRACE_FN();
 
@@ -558,8 +508,7 @@ ofproto_sai_port_del(struct ofproto *ofproto_, ofp_port_t ofp_port)
 }
 
 static int
-ofproto_sai_port_get_stats(const struct ofport *ofport_,
-                           struct netdev_stats *stats)
+__port_get_stats(const struct ofport *ofport_, struct netdev_stats *stats)
 {
     SAI_API_TRACE_NOT_IMPLEMENTED_FN();
 
@@ -567,7 +516,7 @@ ofproto_sai_port_get_stats(const struct ofport *ofport_,
 }
 
 static int
-ofproto_sai_port_dump_start(const struct ofproto *ofproto_ OVS_UNUSED,
+__port_dump_start(const struct ofproto *ofproto_ OVS_UNUSED,
                             void **statep)
 {
     SAI_API_TRACE_FN();
@@ -578,10 +527,10 @@ ofproto_sai_port_dump_start(const struct ofproto *ofproto_ OVS_UNUSED,
 }
 
 static int
-ofproto_sai_port_dump_next(const struct ofproto *ofproto_, void *state_,
-                           struct ofproto_port *port)
+__port_dump_next(const struct ofproto *ofproto_, void *state_,
+                 struct ofproto_port *port)
 {
-    struct ofproto_sai *ofproto = ofproto_sai_cast(ofproto_);
+    struct ofproto_sai *ofproto = __ofproto_sai_cast(ofproto_);
     struct port_dump_state *state = state_;
     struct sset_node *node;
 
@@ -596,8 +545,7 @@ ofproto_sai_port_dump_next(const struct ofproto *ofproto_, void *state_,
                                     &state->offset))) {
         int error;
 
-        error = ofproto_sai_port_query_by_name(ofproto_, node->name,
-                                               &state->port);
+        error = __port_query_by_name(ofproto_, node->name, &state->port);
         if (!error) {
             *port = state->port;
             state->has_port = true;
@@ -611,14 +559,14 @@ ofproto_sai_port_dump_next(const struct ofproto *ofproto_, void *state_,
         state->ghost = true;
         state->bucket = 0;
         state->offset = 0;
-        return ofproto_sai_port_dump_next(ofproto_, state_, port);
+        return __port_dump_next(ofproto_, state_, port);
     }
 
     return EOF;
 }
 
 static int
-ofproto_sai_port_dump_done(const struct ofproto *ofproto_, void *state_)
+__port_dump_done(const struct ofproto *ofproto_, void *state_)
 {
     struct port_dump_state *state = state_;
 
@@ -632,7 +580,7 @@ ofproto_sai_port_dump_done(const struct ofproto *ofproto_, void *state_)
 }
 
 static struct rule *
-ofproto_sai_rule_alloc(void)
+__rule_alloc(void)
 {
     struct rule *rule = xzalloc(sizeof *rule);
 
@@ -642,7 +590,7 @@ ofproto_sai_rule_alloc(void)
 }
 
 static void
-ofproto_sai_rule_dealloc(struct rule *rule_)
+__rule_dealloc(struct rule *rule_)
 {
     SAI_API_TRACE_NOT_IMPLEMENTED_FN();
 
@@ -650,7 +598,7 @@ ofproto_sai_rule_dealloc(struct rule *rule_)
 }
 
 static enum ofperr
-ofproto_sai_rule_construct(struct rule *rule_)
+__rule_construct(struct rule *rule_)
 {
     SAI_API_TRACE_NOT_IMPLEMENTED_FN();
 
@@ -658,7 +606,7 @@ ofproto_sai_rule_construct(struct rule *rule_)
 }
 
 static void
-ofproto_sai_rule_insert(struct rule *rule_,
+__rule_insert(struct rule *rule_,
                         struct rule *old_rule,
                         bool forward_stats)
 {
@@ -666,7 +614,7 @@ ofproto_sai_rule_insert(struct rule *rule_,
 }
 
 static void
-ofproto_sai_rule_delete(struct rule *rule_)
+__rule_delete(struct rule *rule_)
 {
     SAI_API_TRACE_NOT_IMPLEMENTED_FN();
 
@@ -674,7 +622,7 @@ ofproto_sai_rule_delete(struct rule *rule_)
 }
 
 static void
-ofproto_sai_rule_destruct(struct rule *rule_)
+__rule_destruct(struct rule *rule_)
 {
     SAI_API_TRACE_NOT_IMPLEMENTED_FN();
 
@@ -682,7 +630,7 @@ ofproto_sai_rule_destruct(struct rule *rule_)
 }
 
 static void
-ofproto_sai_rule_get_stats(struct rule *rule_, uint64_t *packets,
+__rule_get_stats(struct rule *rule_, uint64_t *packets,
                            uint64_t *bytes OVS_UNUSED,
                            long long int *used OVS_UNUSED)
 {
@@ -692,7 +640,7 @@ ofproto_sai_rule_get_stats(struct rule *rule_, uint64_t *packets,
 }
 
 static enum ofperr
-ofproto_sai_rule_execute(struct rule *rule OVS_UNUSED, const struct flow *flow,
+__rule_execute(struct rule *rule OVS_UNUSED, const struct flow *flow,
                          struct dp_packet *packet)
 {
     SAI_API_TRACE_NOT_IMPLEMENTED_FN();
@@ -701,7 +649,7 @@ ofproto_sai_rule_execute(struct rule *rule OVS_UNUSED, const struct flow *flow,
 }
 
 static bool
-ofproto_sai_set_frag_handling(struct ofproto *ofproto_,
+__set_frag_handling(struct ofproto *ofproto_,
                               enum ofp_config_flags frag_handling)
 {
     SAI_API_TRACE_NOT_IMPLEMENTED_FN();
@@ -710,7 +658,7 @@ ofproto_sai_set_frag_handling(struct ofproto *ofproto_,
 }
 
 static enum ofperr
-ofproto_sai_packet_out(struct ofproto *ofproto_, struct dp_packet *packet,
+__packet_out(struct ofproto *ofproto_, struct dp_packet *packet,
                        const struct flow *flow,
                        const struct ofpact *ofpacts, size_t ofpacts_len)
 {
@@ -719,190 +667,68 @@ ofproto_sai_packet_out(struct ofproto *ofproto_, struct dp_packet *packet,
     return 0;
 }
 
-static sai_status_t
-ofbundle_sai_port_vlan_set(const struct ofport_sai *port, sai_vlan_id_t vid,
-                           sai_vlan_tagging_mode_t mode, bool add)
+/*
+ * Add port to bundle.
+ */
+static int
+__ofbundle_port_add(struct ofbundle_sai *bundle, struct ofport_sai *port)
 {
-    sai_attribute_t attr = { };
-    sai_vlan_port_t vlan_port = { };
-    sai_status_t status = SAI_STATUS_SUCCESS;
-    const struct sai_api_class *sai_api = sai_api_get_instance();
+    int status = 0;
+    uint32_t hw_id = netdev_sai_hw_id_get(port->up.netdev);
 
     if (NULL == port) {
-        status = SAI_STATUS_INVALID_PARAMETER;
-        SAI_ERROR_LOG_EXIT(status, "Failed to set vlan: got NULL port");
-    }
-
-    vlan_port.port_id = port->port_oid;
-    vlan_port.tagging_mode = mode;
-    if (add) {
-        status = sai_api->vlan_api->add_ports_to_vlan(vid, 1, &vlan_port);
-    } else {
-        status = sai_api->vlan_api->remove_ports_from_vlan(vid, 1, &vlan_port);
-    }
-    SAI_ERROR_LOG_EXIT(status, "Failed to %s vlan %d on port %lu", add ? "add" : "remove", vid,
-                       port->port_oid);
-
-    if (add && (SAI_VLAN_PORT_UNTAGGED != mode)) {
-        goto exit;
-    }
-
-    attr.id = SAI_PORT_ATTR_PORT_VLAN_ID;
-    attr.value.u32 = vid;
-    status = sai_api->port_api->set_port_attribute(port->port_oid, &attr);
-    SAI_ERROR_LOG_EXIT(status, "Failed to set pvid %d for port %lu",
-                       vid, port->port_oid);
-
-exit:
-    return status;
-}
-
-static sai_status_t
-ofbundle_sai_port_vlan_add(const struct ofport_sai *port, sai_vlan_id_t vid,
-                           sai_vlan_tagging_mode_t mode)
-{
-    return ofbundle_sai_port_vlan_set(port, vid, mode, true);
-}
-
-static sai_status_t
-ofbundle_sai_port_vlan_del(const struct ofport_sai *port, sai_vlan_id_t vid)
-{
-    /* Mode doesn't matter when port is removed from vlan. */
-    return ofbundle_sai_port_vlan_set(port, vid, SAI_VLAN_PORT_UNTAGGED,
-                                      false);
-}
-
-static sai_status_t
-ofbundle_sai_port_trunks_set(const struct ofport_sai *port,
-                             unsigned long *trunks,
-                             sai_vlan_tagging_mode_t mode, bool add)
-{
-    int vid = 0;
-    sai_status_t status = SAI_STATUS_SUCCESS;
-
-    if (NULL == trunks) {
-        status = SAI_STATUS_INVALID_PARAMETER;
-        SAI_ERROR_LOG_EXIT(status, "Got NULL trunks");
-    }
-
-    BITMAP_FOR_EACH_1(vid, VLAN_BITMAP_SIZE, trunks) {
-        status = ofbundle_sai_port_vlan_set(port, vid, mode, add);
-        SAI_ERROR_LOG_EXIT(status, "Failed to %s trunks", add ? "add" : "remove");
-    }
-
-exit:
-    return status;
-}
-
-static sai_status_t
-ofbundle_sai_port_trunks_add(struct ofport_sai *port, unsigned long *trunks,
-                             sai_vlan_tagging_mode_t mode)
-{
-    return ofbundle_sai_port_trunks_set(port, trunks, mode, true);
-}
-
-static sai_status_t
-ofbundle_sai_port_trunks_del(struct ofport_sai *port, unsigned long *trunks)
-{
-    return ofbundle_sai_port_trunks_set(port, trunks, SAI_VLAN_PORT_UNTAGGED,
-                                        false);
-}
-
-static sai_vlan_tagging_mode_t
-ofbundle_sai_vlan_mode(enum port_vlan_mode ovs_mode, bool is_trunk)
-{
-    sai_vlan_tagging_mode_t sai_mode;
-
-    switch (ovs_mode) {
-    case PORT_VLAN_ACCESS:
-        sai_mode = SAI_VLAN_PORT_UNTAGGED;
-        break;
-    case PORT_VLAN_TRUNK:
-    case PORT_VLAN_NATIVE_TAGGED:
-        sai_mode = SAI_VLAN_PORT_TAGGED;
-        break;
-    case PORT_VLAN_NATIVE_UNTAGGED:
-        sai_mode = is_trunk ? SAI_VLAN_PORT_TAGGED : SAI_VLAN_PORT_UNTAGGED;
-        break;
-    default:
-        ovs_assert(false);
-    }
-
-    return sai_mode;
-}
-
-static sai_status_t
-ofbundle_sai_port_pvid_vlan_del(struct ofport_sai *port)
-{
-    sai_attribute_t attr = { };
-    sai_status_t status = SAI_STATUS_SUCCESS;
-    const struct sai_api_class *sai_api = sai_api_get_instance();
-
-    attr.id = SAI_PORT_ATTR_PORT_VLAN_ID;
-    status = sai_api->port_api->get_port_attribute(port->port_oid, 1, &attr);
-    SAI_ERROR_LOG_EXIT(status, "Failed to get pvid for port %lu",
-                       port->port_oid);
-
-    status = ofbundle_sai_port_vlan_del(port, attr.value.u32);
-exit:
-    return status;
-}
-
-static sai_status_t
-ofbundle_sai_port_add(struct ofbundle_sai *bundle, struct ofport_sai *port)
-{
-    sai_status_t status = SAI_STATUS_SUCCESS;
-
-    if (NULL == port) {
-        status = SAI_STATUS_INVALID_PARAMETER;
-        SAI_ERROR_LOG_EXIT(status, "Got NULL port to add");
+        status = EINVAL;
+        ERRNO_LOG_EXIT(status, "Got NULL port to add");
     }
 
     /* Port belongs to other bundle - remove. */
     if (NULL != port->bundle) {
-        ofproto_sai_bundle_remove(&port->up);
+        VLOG_WARN("Add port to bundle: removing port from old bundle");
+        __bundle_remove(&port->up);
     }
 
     port->bundle = bundle;
     list_push_back(&bundle->ports, &port->bundle_node);
 
     if (-1 != bundle->vlan) {
-        status = ofbundle_sai_port_vlan_add(port, bundle->vlan,
-                                            ofbundle_sai_vlan_mode(bundle->vlan_mode, false));
-        SAI_ERROR_LOG_EXIT(status, "Failed to add port to bundle");
+        status = ops_sai_vlan_access_port_add(bundle->vlan, hw_id);
+        ERRNO_LOG_EXIT(status, "Failed to add port to bundle");
     }
 
     if (NULL != bundle->trunks) {
-        status = ofbundle_sai_port_trunks_add(port, bundle->trunks,
-                                              ofbundle_sai_vlan_mode(bundle->vlan_mode, true));
-        SAI_ERROR_LOG_EXIT(status, "Failed to add port to bundle");
+        status = ops_sai_vlan_trunks_port_add(bundle->trunks, hw_id);
+        ERRNO_LOG_EXIT(status, "Failed to add port to bundle");
     }
 
 exit:
     return status;
 }
 
-static sai_status_t
-ofbundle_sai_port_del(struct ofport_sai *port)
+/*
+ * Remove port from bundle.
+ */
+static int
+__ofbundle_port_del(struct ofport_sai *port)
 {
     struct ofbundle_sai *bundle;
-    sai_status_t status = SAI_STATUS_SUCCESS;
+    int status = 0;
+    uint32_t hw_id = netdev_sai_hw_id_get(port->up.netdev);
 
     if (NULL == port) {
-        status = SAI_STATUS_INVALID_PARAMETER;
-        SAI_ERROR_LOG_EXIT(status, "Got NULL port to remove");
+        status = EINVAL;
+        ERRNO_LOG_EXIT(status, "Got NULL port to remove");
     }
 
     bundle = port->bundle;
 
     if (-1 != bundle->vlan) {
-        status = ofbundle_sai_port_vlan_del(port, bundle->vlan);
-        SAI_ERROR_LOG_EXIT(status, "Failed to remove port from bundle");
+        status = ops_sai_vlan_access_port_del(bundle->vlan, hw_id);
+        ERRNO_LOG_EXIT(status, "Failed to remove port from bundle");
     }
 
     if (NULL != bundle->trunks) {
-        status = ofbundle_sai_port_trunks_del(port, bundle->trunks);
-        SAI_ERROR_LOG_EXIT(status, "Failed to remove port from bundle");
+        status = ops_sai_vlan_trunks_port_del(bundle->trunks, hw_id);
+        ERRNO_LOG_EXIT(status, "Failed to remove port from bundle");
     }
 
 exit:
@@ -912,8 +738,11 @@ exit:
     return status;
 }
 
+/*
+ * Reallocate bundle trunks.
+ */
 static void
-ofbundle_sai_trunks_realloc(struct ofbundle_sai *bundle,
+__trunks_realloc(struct ofbundle_sai *bundle,
                             const unsigned long *trunks)
 {
     /* Name didn't change. */
@@ -931,18 +760,44 @@ ofbundle_sai_trunks_realloc(struct ofbundle_sai *bundle,
     }
 }
 
-static sai_status_t
-ofbundle_sai_vlan_reconfigure(struct ofbundle_sai *bundle,
+/*
+ * Set native tagged vlan and corresponding pvid.
+ */
+static int __native_tagged_vlan_set(int vid, uint32_t hw_id, bool add)
+{
+    int status = 0;
+    static unsigned long trunks[BITMAP_N_LONGS(VLAN_BITMAP_SIZE)];
+
+    bitmap_and(trunks, empty_trunks, VLAN_BITMAP_SIZE);
+    bitmap_set1(trunks, vid);
+
+    status =  add ? ops_sai_vlan_trunks_port_add(trunks, hw_id) :
+                    ops_sai_vlan_trunks_port_del(trunks, hw_id);
+    ERRNO_EXIT(status);
+
+    status = ops_sai_port_pvid_set(hw_id, add ? vid :
+                                   OPS_SAI_PORT_DEFAULT_PVID);
+    ERRNO_EXIT(status);
+
+exit:
+    return status;
+}
+
+/*
+ * Reconfigure port to vlan settings. Remove ports from vlans that were in
+ * bundle and add ports to vlan in new settings.
+ */
+static int
+__vlan_reconfigure(struct ofbundle_sai *bundle,
                               const struct ofproto_bundle_settings *s)
 {
-    sai_status_t status = SAI_STATUS_SUCCESS;
+    int status = 0;
     bool tag_changed = bundle->vlan != s->vlan;
     bool mod_changed = bundle->vlan_mode != s->vlan_mode;
     struct ofport_sai *port = NULL, *next_port = NULL;
     static unsigned long added_trunks[BITMAP_N_LONGS(VLAN_BITMAP_SIZE)];
     static unsigned long common_trunks[BITMAP_N_LONGS(VLAN_BITMAP_SIZE)];
     static unsigned long removed_trunks[BITMAP_N_LONGS(VLAN_BITMAP_SIZE)];
-    static const unsigned long empty_trunks[BITMAP_N_LONGS(VLAN_BITMAP_SIZE)];
 
     /* Initialize all trunks as empty. */
     bitmap_and(added_trunks, empty_trunks, VLAN_BITMAP_SIZE);
@@ -970,28 +825,48 @@ ofbundle_sai_vlan_reconfigure(struct ofbundle_sai *bundle,
     case PORT_VLAN_ACCESS:
         if (tag_changed) {
             LIST_FOR_EACH_SAFE(port, next_port, bundle_node, &bundle->ports) {
-                status = ofbundle_sai_port_vlan_del(port, bundle->vlan);
-                SAI_ERROR_LOG_EXIT(status, "Failed to remove reconfigure vlans");
+                status = ops_sai_vlan_access_port_del(bundle->vlan,
+                                                      netdev_sai_hw_id_get(port->up.netdev));
+                ERRNO_LOG_EXIT(status, "Failed to remove reconfigure vlans");
             }
         }
         break;
+
     case PORT_VLAN_TRUNK:
         LIST_FOR_EACH_SAFE(port, next_port, bundle_node, &bundle->ports) {
-            status = ofbundle_sai_port_trunks_del(port, removed_trunks);
-            SAI_ERROR_LOG_EXIT(status, "Failed to remove reconfigure vlans");
+            status = ops_sai_vlan_trunks_port_del(removed_trunks,
+                                                  netdev_sai_hw_id_get(port->up.netdev));
+            ERRNO_LOG_EXIT(status, "Failed to remove reconfigure vlans");
         }
         break;
-    case PORT_VLAN_NATIVE_TAGGED:
+
     case PORT_VLAN_NATIVE_UNTAGGED:
         LIST_FOR_EACH_SAFE(port, next_port, bundle_node, &bundle->ports) {
             if (tag_changed || mod_changed) {
-                status = ofbundle_sai_port_vlan_del(port, bundle->vlan);
-                SAI_ERROR_LOG_EXIT(status, "Failed to remove reconfigure vlans");
+                status = ops_sai_vlan_access_port_del(bundle->vlan,
+                                                      netdev_sai_hw_id_get(port->up.netdev));
+                ERRNO_LOG_EXIT(status, "Failed to remove reconfigure vlans");
             }
-            status = ofbundle_sai_port_trunks_del(port, removed_trunks);
-            SAI_ERROR_LOG_EXIT(status, "Failed to remove reconfigure vlans");
+            status = ops_sai_vlan_trunks_port_del(removed_trunks,
+                                                  netdev_sai_hw_id_get(port->up.netdev));
+            ERRNO_LOG_EXIT(status, "Failed to remove reconfigure vlans");
         }
         break;
+
+    case PORT_VLAN_NATIVE_TAGGED:
+        LIST_FOR_EACH_SAFE(port, next_port, bundle_node, &bundle->ports) {
+            if (tag_changed || mod_changed) {
+                status = __native_tagged_vlan_set(bundle->vlan,
+                                                  netdev_sai_hw_id_get(port->up.netdev),
+                                                  false);
+                ERRNO_LOG_EXIT(status, "Failed to remove reconfigure vlans");
+            }
+            status = ops_sai_vlan_trunks_port_del(removed_trunks,
+                                                  netdev_sai_hw_id_get(port->up.netdev));
+            ERRNO_LOG_EXIT(status, "Failed to remove reconfigure vlans");
+        }
+        break;
+
     default:
         ovs_assert(false);
     }
@@ -1001,79 +876,94 @@ ofbundle_sai_vlan_reconfigure(struct ofbundle_sai *bundle,
     case PORT_VLAN_ACCESS:
         if (tag_changed) {
             LIST_FOR_EACH_SAFE(port, next_port, bundle_node, &bundle->ports) {
-                status = ofbundle_sai_port_vlan_add(port, s->vlan,
-                                                   ofbundle_sai_vlan_mode(s->vlan_mode, false));
-                SAI_ERROR_LOG_EXIT(status, "Failed to reconfigure vlans");
+                status = ops_sai_vlan_access_port_add(s->vlan,
+                                                      netdev_sai_hw_id_get(port->up.netdev));
+                ERRNO_LOG_EXIT(status, "Failed to reconfigure vlans");
             }
         }
         break;
+
     case PORT_VLAN_TRUNK:
         LIST_FOR_EACH_SAFE(port, next_port, bundle_node, &bundle->ports) {
-            status = ofbundle_sai_port_trunks_add(port, added_trunks,
-                                                  ofbundle_sai_vlan_mode(s->vlan_mode, true));
-            SAI_ERROR_LOG_EXIT(status, "Failed to reconfigure vlans");
+            status = ops_sai_vlan_trunks_port_add(added_trunks,
+                                                  netdev_sai_hw_id_get(port->up.netdev));
+            ERRNO_LOG_EXIT(status, "Failed to reconfigure vlans");
         }
         break;
-    case PORT_VLAN_NATIVE_TAGGED:
+
     case PORT_VLAN_NATIVE_UNTAGGED:
         LIST_FOR_EACH_SAFE(port, next_port, bundle_node, &bundle->ports) {
             if (tag_changed || mod_changed) {
-                status = ofbundle_sai_port_vlan_add(port, s->vlan,
-                                                    ofbundle_sai_vlan_mode(s->vlan_mode, false));
-                SAI_ERROR_LOG_EXIT(status, "Failed to reconfigure vlans");
-
+                status = ops_sai_vlan_access_port_add(s->vlan,
+                                                      netdev_sai_hw_id_get(port->up.netdev));
+                ERRNO_LOG_EXIT(status, "Failed to reconfigure vlans");
             }
-            status = ofbundle_sai_port_trunks_add(port, added_trunks,
-                                                  ofbundle_sai_vlan_mode(s->vlan_mode, true));
-            SAI_ERROR_LOG_EXIT(status, "Failed to reconfigure vlans");
+            status = ops_sai_vlan_trunks_port_add(added_trunks,
+                                                  netdev_sai_hw_id_get(port->up.netdev));
+            ERRNO_LOG_EXIT(status, "Failed to reconfigure vlans");
         }
         break;
+
+    case PORT_VLAN_NATIVE_TAGGED:
+        LIST_FOR_EACH_SAFE(port, next_port, bundle_node, &bundle->ports) {
+            if (tag_changed || mod_changed) {
+                status = __native_tagged_vlan_set(s->vlan,
+                                                  netdev_sai_hw_id_get(port->up.netdev),
+                                                  true);
+                ERRNO_LOG_EXIT(status, "Failed to reconfigure vlans");
+            }
+            status = ops_sai_vlan_trunks_port_add(added_trunks,
+                                                  netdev_sai_hw_id_get(port->up.netdev));
+            ERRNO_LOG_EXIT(status, "Failed to reconfigure vlans");
+        }
+        break;
+
     default:
         ovs_assert(false);
     }
 
     bundle->vlan = s->vlan;
     bundle->vlan_mode = s->vlan_mode;
-    ofbundle_sai_trunks_realloc(bundle, s->trunks);
+    __trunks_realloc(bundle, s->trunks);
 
 exit:
     return status;
 }
 
-static sai_status_t
-ofbundle_sai_ports_reconfigure(struct ofbundle_sai *bundle,
+static int
+__ofbundle_ports_reconfigure(struct ofbundle_sai *bundle,
                                const struct ofproto_bundle_settings *s)
 {
     size_t i;
     bool port_found = false;
-    sai_status_t status = SAI_STATUS_SUCCESS;
+    int status = 0;
     struct ofport_sai *port = NULL, *next_port = NULL, *s_port = NULL;
 
     /* Figure out which ports were removed. */
     LIST_FOR_EACH_SAFE(port, next_port, bundle_node, &bundle->ports) {
         port_found = false;
         for (i = 0; i < s->n_slaves; i++) {
-            s_port = ofproto_sai_get_ofp_port(bundle->ofproto, s->slaves[i]);
+            s_port = __get_ofp_port(bundle->ofproto, s->slaves[i]);
             if (port == s_port) {
                 port_found = true;
                 break;
             }
         }
         if (!port_found) {
-            status = ofbundle_sai_port_del(port);
-            SAI_ERROR_LOG_EXIT(status, "Failed to reconfigure ports");
+            status = __ofbundle_port_del(port);
+            ERRNO_LOG_EXIT(status, "Failed to reconfigure ports");
         }
     }
 
-    status = ofbundle_sai_vlan_reconfigure(bundle, s);
-    SAI_ERROR_LOG_EXIT(status, "Failed to reconfigure ports");
+    status = __vlan_reconfigure(bundle, s);
+    ERRNO_LOG_EXIT(status, "Failed to reconfigure ports");
 
     /* Figure out which ports were added. */
     port = NULL;
     next_port = NULL;
     for (i = 0; i < s->n_slaves; i++) {
         port_found = false;
-        s_port = ofproto_sai_get_ofp_port(bundle->ofproto, s->slaves[i]);
+        s_port = __get_ofp_port(bundle->ofproto, s->slaves[i]);
 
         LIST_FOR_EACH_SAFE(port, next_port, bundle_node, &bundle->ports) {
             if (port == s_port) {
@@ -1083,17 +973,20 @@ ofbundle_sai_ports_reconfigure(struct ofbundle_sai *bundle,
         }
 
         if (!port_found) {
-            status = ofbundle_sai_port_add(bundle, s_port);
+            status = __ofbundle_port_add(bundle, s_port);
         }
-        SAI_ERROR_LOG_EXIT(status, "Failed to reconfigure ports");
+        ERRNO_LOG_EXIT(status, "Failed to reconfigure ports");
     }
 
 exit:
     return status;
 }
 
+/*
+ * Rename bundle or delete name if new name is NULL.
+ */
 static void
-ofbundle_sai_rename(struct ofbundle_sai *bundle, const char *name)
+__ofbundle_rename(struct ofbundle_sai *bundle, const char *name)
 {
     /* Name didn't change. */
     if ((NULL != bundle->name) && (NULL != name)
@@ -1111,16 +1004,19 @@ ofbundle_sai_rename(struct ofbundle_sai *bundle, const char *name)
     }
 }
 
+/*
+ * Create new bundle and perform basic initialization.
+ */
 static struct ofbundle_sai *
-ofbundle_sai_create(struct ofproto_sai *ofproto, void *aux,
+__ofbundle_create(struct ofproto_sai *ofproto, void *aux,
                     const struct ofproto_bundle_settings *s)
 {
     struct ofbundle_sai *bundle = xzalloc(sizeof (struct ofbundle_sai));
 
     hmap_insert(&ofproto->bundles, &bundle->hmap_node, hash_pointer(aux, 0));
     list_init(&bundle->ports);
-    ofbundle_sai_rename(bundle, s->name);
-    ofbundle_sai_trunks_realloc(bundle, s->trunks);
+    __ofbundle_rename(bundle, s->name);
+    __trunks_realloc(bundle, s->trunks);
 
     bundle->ofproto = ofproto;
     bundle->aux = aux;
@@ -1128,10 +1024,13 @@ ofbundle_sai_create(struct ofproto_sai *ofproto, void *aux,
     return bundle;
 }
 
+/*
+ * Destroy bundle and remove ports from it.
+ */
 static void
-ofbundle_sai_destroy(struct ofbundle_sai *bundle)
+__ofbundle_destroy(struct ofbundle_sai *bundle)
 {
-    sai_status_t status = SAI_STATUS_SUCCESS;
+    int status = 0;
     struct ofport_sai *port = NULL, *next_port = NULL;
 
     if (NULL == bundle) {
@@ -1139,20 +1038,23 @@ ofbundle_sai_destroy(struct ofbundle_sai *bundle)
     }
 
     LIST_FOR_EACH_SAFE(port, next_port, bundle_node, &bundle->ports) {
-        status = ofbundle_sai_port_del(port);
-        SAI_ERROR_LOG_EXIT(status, "Failed to destroy bundle");
+        status = __ofbundle_port_del(port);
+        ERRNO_LOG_EXIT(status, "Failed to destroy bundle");
     }
 
 exit:
-    ofbundle_sai_rename(bundle, NULL);
-    ofbundle_sai_trunks_realloc(bundle, NULL);
+    __ofbundle_rename(bundle, NULL);
+    __trunks_realloc(bundle, NULL);
     hmap_remove(&bundle->ofproto->bundles, &bundle->hmap_node);
 
     free(bundle);
 }
 
+/*
+ * Find bundle by aux.
+ */
 static struct ofbundle_sai *
-ofbundle_sai_lookup(struct ofproto_sai *ofproto, void *aux)
+__ofbundle_lookup(struct ofproto_sai *ofproto, void *aux)
 {
     struct ofbundle_sai *bundle;
 
@@ -1166,13 +1068,16 @@ ofbundle_sai_lookup(struct ofproto_sai *ofproto, void *aux)
     return NULL;
 }
 
+/*
+ * Apply bundle settings.
+ */
 static int
-ofproto_sai_bundle_set(struct ofproto *ofproto_, void *aux,
+__bundle_set(struct ofproto *ofproto_, void *aux,
                        const struct ofproto_bundle_settings *s)
 {
     struct ofbundle_sai *bundle = NULL;
-    sai_status_t status = SAI_STATUS_SUCCESS;
-    struct ofproto_sai *ofproto = ofproto_sai_cast(ofproto_);
+    int status = 0;
+    struct ofproto_sai *ofproto = __ofproto_sai_cast(ofproto_);
 
     SAI_API_TRACE_FN();
 
@@ -1181,28 +1086,28 @@ ofproto_sai_bundle_set(struct ofproto *ofproto_, void *aux,
         goto exit;
     }
 
-    bundle = ofbundle_sai_lookup(ofproto, aux);
+    bundle = __ofbundle_lookup(ofproto, aux);
     if (NULL == s) {
-        ofbundle_sai_destroy(bundle);
+        __ofbundle_destroy(bundle);
         goto exit;
     }
 
     if (NULL == bundle) {
-        bundle = ofbundle_sai_create(ofproto, aux, s);
+        bundle = __ofbundle_create(ofproto, aux, s);
     }
 
-    status = ofbundle_sai_ports_reconfigure(bundle, s);
-    SAI_ERROR_LOG_EXIT(status, "Failed to set bundle");
+    status = __ofbundle_ports_reconfigure(bundle, s);
+    ERRNO_LOG_EXIT(status, "Failed to set bundle");
 
 exit:
-    return SAI_ERROR(status);
+    return status;
 }
 
 static void
-ofproto_sai_bundle_remove(struct ofport *port_)
+__bundle_remove(struct ofport *port_)
 {
-    sai_status_t status = SAI_STATUS_SUCCESS;
-    struct ofport_sai *port = ofport_sai_cast(port_);
+    int status = 0;
+    struct ofport_sai *port = __ofport_sai_cast(port_);
     struct ofbundle_sai *bundle = port->bundle;
 
     SAI_API_TRACE_FN();
@@ -1211,17 +1116,17 @@ ofproto_sai_bundle_remove(struct ofport *port_)
         return;
     }
 
-    status = ofbundle_sai_port_del(port);
-    SAI_ERROR_LOG_EXIT(status, "Failed to remove bundle");
+    status = __ofbundle_port_del(port);
+    ERRNO_LOG_EXIT(status, "Failed to remove bundle");
 
 exit:
     if (list_is_empty(&bundle->ports)) {
-        ofbundle_sai_destroy(bundle);
+        __ofbundle_destroy(bundle);
     }
 }
 
 static int
-ofproto_sai_bundle_get(struct ofproto *ofproto_, void *aux, int *bundle_handle)
+__bundle_get(struct ofproto *ofproto_, void *aux, int *bundle_handle)
 {
     SAI_API_TRACE_FN();
 
@@ -1229,32 +1134,21 @@ ofproto_sai_bundle_get(struct ofproto *ofproto_, void *aux, int *bundle_handle)
 }
 
 static int
-ofproto_sai_set_vlan(struct ofproto *ofproto, int vid, bool add)
+__set_vlan(struct ofproto *ofproto, int vid, bool add)
 {
-    sai_status_t status = SAI_STATUS_SUCCESS;
-    const struct sai_api_class *sai_api = sai_api_get_instance();
-
     SAI_API_TRACE_FN();
 
-    if (add) {
-        status = sai_api->vlan_api->create_vlan(vid);
-    } else {
-        status = sai_api->vlan_api->remove_vlan(vid);
-    }
-    SAI_ERROR_LOG_EXIT(status, "Failed to %s vlan vid %d", add ? "create" : "remove", vid);
-
-exit:
-    return SAI_ERROR(status);
+    return ops_sai_vlan_set(vid, add);
 }
 
 static inline struct ofproto_sai_group *
-ofproto_sai_group_cast(const struct ofgroup *group)
+__ofproto_sai_group_cast(const struct ofgroup *group)
 {
     return group ? CONTAINER_OF(group, struct ofproto_sai_group, up) : NULL;
 }
 
 static struct ofgroup *
-ofproto_sai_group_alloc(void)
+__group_alloc(void)
 {
     struct ofproto_sai_group *group = xzalloc(sizeof *group);
 
@@ -1264,7 +1158,7 @@ ofproto_sai_group_alloc(void)
 }
 
 static enum ofperr
-ofproto_sai_group_construct(struct ofgroup *group_)
+__group_construct(struct ofgroup *group_)
 {
     SAI_API_TRACE_NOT_IMPLEMENTED_FN();
 
@@ -1272,7 +1166,7 @@ ofproto_sai_group_construct(struct ofgroup *group_)
 }
 
 static void
-ofproto_sai_group_destruct(struct ofgroup *group_)
+__group_destruct(struct ofgroup *group_)
 {
     SAI_API_TRACE_NOT_IMPLEMENTED_FN();
 
@@ -1280,9 +1174,9 @@ ofproto_sai_group_destruct(struct ofgroup *group_)
 }
 
 static void
-ofproto_sai_group_dealloc(struct ofgroup *group_)
+__group_dealloc(struct ofgroup *group_)
 {
-    struct ofproto_sai_group *group = ofproto_sai_group_cast(group_);
+    struct ofproto_sai_group *group = __ofproto_sai_group_cast(group_);
 
     SAI_API_TRACE_NOT_IMPLEMENTED_FN();
 
@@ -1290,7 +1184,7 @@ ofproto_sai_group_dealloc(struct ofgroup *group_)
 }
 
 static enum ofperr
-ofproto_sai_group_modify(struct ofgroup *group_)
+__group_modify(struct ofgroup *group_)
 {
     SAI_API_TRACE_NOT_IMPLEMENTED_FN();
 
@@ -1298,8 +1192,8 @@ ofproto_sai_group_modify(struct ofgroup *group_)
 }
 
 static enum ofperr
-ofproto_sai_group_get_stats(const struct ofgroup *group_,
-                            struct ofputil_group_stats *ogs)
+__group_get_stats(const struct ofgroup *group_,
+                  struct ofputil_group_stats *ogs)
 {
     SAI_API_TRACE_NOT_IMPLEMENTED_FN();
 
@@ -1307,7 +1201,7 @@ ofproto_sai_group_get_stats(const struct ofgroup *group_,
 }
 
 static const char *
-ofproto_sai_get_datapath_version(const struct ofproto *ofproto_ OVS_UNUSED)
+__get_datapath_version(const struct ofproto *ofproto_ OVS_UNUSED)
 {
     SAI_API_TRACE_FN();
 
@@ -1315,7 +1209,7 @@ ofproto_sai_get_datapath_version(const struct ofproto *ofproto_ OVS_UNUSED)
 }
 
 static int
-ofproto_sai_add_l3_host_entry(const struct ofproto *ofproto_, void *aux,
+__add_l3_host_entry(const struct ofproto *ofproto_, void *aux,
                               bool is_ipv6_addr, char *ip_addr,
                               char *next_hop_mac_addr, int *l3_egress_id)
 {
@@ -1325,7 +1219,7 @@ ofproto_sai_add_l3_host_entry(const struct ofproto *ofproto_, void *aux,
 }
 
 static int
-ofproto_sai_delete_l3_host_entry(const struct ofproto *ofproto_, void *aux,
+__delete_l3_host_entry(const struct ofproto *ofproto_, void *aux,
                                  bool is_ipv6_addr, char *ip_addr,
                                  int *l3_egress_id)
 {
@@ -1335,7 +1229,7 @@ ofproto_sai_delete_l3_host_entry(const struct ofproto *ofproto_, void *aux,
 }
 
 static int
-ofproto_sai_get_l3_host_hit_bit(const struct ofproto *ofproto_, void *aux,
+__get_l3_host_hit_bit(const struct ofproto *ofproto_, void *aux,
                                 bool is_ipv6_addr, char *ip_addr,
                                 bool *hit_bit)
 {
@@ -1345,7 +1239,7 @@ ofproto_sai_get_l3_host_hit_bit(const struct ofproto *ofproto_, void *aux,
 }
 
 static int
-ofproto_sai_l3_route_action(const struct ofproto *ofprotop,
+__l3_route_action(const struct ofproto *ofprotop,
                             enum ofproto_route_action action,
                             struct ofproto_route *routep)
 {
@@ -1355,7 +1249,7 @@ ofproto_sai_l3_route_action(const struct ofproto *ofprotop,
 }
 
 static int
-ofproto_sai_l3_ecmp_set(const struct ofproto *ofprotop, bool enable)
+__l3_ecmp_set(const struct ofproto *ofprotop, bool enable)
 {
     SAI_API_TRACE_NOT_IMPLEMENTED_FN();
 
@@ -1363,7 +1257,7 @@ ofproto_sai_l3_ecmp_set(const struct ofproto *ofprotop, bool enable)
 }
 
 static int
-ofproto_sai_l3_ecmp_hash_set(const struct ofproto *ofprotop, unsigned int hash,
+__l3_ecmp_hash_set(const struct ofproto *ofprotop, unsigned int hash,
                              bool enable)
 {
     SAI_API_TRACE_NOT_IMPLEMENTED_FN();
@@ -1372,7 +1266,7 @@ ofproto_sai_l3_ecmp_hash_set(const struct ofproto *ofprotop, unsigned int hash,
 }
 
 static int
-ofproto_sai_run(struct ofproto *ofproto)
+__run(struct ofproto *ofproto)
 {
     SAI_API_TRACE_FN();
 
@@ -1380,13 +1274,13 @@ ofproto_sai_run(struct ofproto *ofproto)
 }
 
 static void
-ofproto_sai_wait(struct ofproto *ofproto)
+__wait(struct ofproto *ofproto)
 {
     SAI_API_TRACE_FN();
 }
 
 static void
-ofproto_sai_set_tables_version(struct ofproto *ofproto, cls_version_t version)
+__set_tables_version(struct ofproto *ofproto, cls_version_t version)
 {
     SAI_API_TRACE_FN();
 

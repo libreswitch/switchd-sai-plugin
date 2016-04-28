@@ -12,7 +12,7 @@
 #define SAI_PORTS_MAX (64)
 #define SAI_MAX_LANES (4)
 
-struct sai_api_class {
+struct ops_sai_api_class {
     sai_switch_api_t *switch_api;
     sai_port_api_t *port_api;
     sai_vlan_api_t *vlan_api;
@@ -20,9 +20,9 @@ struct sai_api_class {
     bool initialized;
 };
 
-int sai_api_init(void);
-int sai_api_uninit(void);
-const struct sai_api_class *sai_api_get_instance(void);
-sai_object_id_t sai_api_hw_id2port_id(uint32_t);
+void ops_sai_api_init(void);
+int ops_sai_api_uninit(void);
+const struct ops_sai_api_class *ops_sai_api_get_instance(void);
+sai_object_id_t ops_sai_api_hw_id2port_id(uint32_t);
 
 #endif /* sai-api-class.h */

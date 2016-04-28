@@ -4,14 +4,14 @@
  * the COPYING file.
  */
 
-#ifndef NETDEV_SAI_H
-#define NETDEV_SAI_H 1
+#ifndef SAI_NETDEV_H
+#define SAI_NETDEV_H 1
 
 #include <saitypes.h>
 #include <netdev-provider.h>
 
 void netdev_sai_register(void);
-sai_object_id_t netdev_sai_oid_get(struct netdev *);
+uint32_t netdev_sai_hw_id_get(struct netdev *);
 void netdev_sai_port_oper_state_changed(sai_object_id_t, int);
 
 #endif /* sai-netdev.h */

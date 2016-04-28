@@ -10,44 +10,54 @@
 #include <sai-log.h>
 #include <sai-netdev.h>
 #include <util.h>
-#include <openvswitch/vlog.h>
+#include <sai-vendor.h>
+
+#ifndef SAI_INIT_CONFIG_FILE_PATH
+#define SAI_INIT_CONFIG_FILE_PATH ""
+#endif
+
+#define MAC_STR_LEN 17
 
 VLOG_DEFINE_THIS_MODULE(sai_api_class);
 
-static struct sai_api_class sai_api;
+static struct ops_sai_api_class sai_api;
 static sai_object_id_t sai_lable_id_to_oid_map[SAI_PORTS_MAX];
+static char sai_api_mac_str[MAC_STR_LEN + 1];
 
-static const char *sai_profile_get_value(sai_switch_profile_id_t,
-                                         const char *);
-static int sai_profile_get_next_value(sai_switch_profile_id_t, const char **,
-                                      const char **);
-static void sai_event_switch_state_changed(sai_switch_oper_status_t);
-static void sai_event_fdb(uint32_t, sai_fdb_event_notification_data_t *);
-static void sai_event_port_state(uint32_t,
-                                 sai_port_oper_status_notification_t *);
-static void sai_event_port(uint32_t, sai_port_event_notification_t *);
-static void sai_event_switch_shutdown(void);
-static void sai_event_rx_packet(const void *, sai_size_t, uint32_t,
+static const char *__profile_get_value(sai_switch_profile_id_t, const char *);
+static int __profile_get_next_value(sai_switch_profile_id_t, const char **,
+                                    const char **);
+static void __event_switch_state_changed(sai_switch_oper_status_t);
+static void __event_fdb(uint32_t, sai_fdb_event_notification_data_t *);
+static void __event_port_state(uint32_t,
+                               sai_port_oper_status_notification_t *);
+static void __event_port(uint32_t, sai_port_event_notification_t *);
+static void __event_switch_shutdown(void);
+static void __event_rx_packet(const void *, sai_size_t, uint32_t,
                                 const sai_attribute_t *);
-static sai_status_t sai_api_get_port_lable_id(sai_object_id_t, uint32_t *);
-static sai_status_t sai_api_init_ports(void);
+static sai_status_t __get_port_lable_id(sai_object_id_t, uint32_t *);
+static sai_status_t __init_ports(void);
 
-int
-sai_api_init(void)
+/**
+ * Initialize SAI api. Register callbacks, query APIs.
+ */
+void
+ops_sai_api_init(void)
 {
     sai_status_t status = SAI_STATUS_SUCCESS;
+    sai_mac_t mac = { };
 
     static const service_method_table_t sai_services = {
-        sai_profile_get_value,
-        sai_profile_get_next_value,
+        __profile_get_value,
+        __profile_get_next_value,
     };
     static sai_switch_notification_t sai_events = {
-        sai_event_switch_state_changed,
-        sai_event_fdb,
-        sai_event_port_state,
-        sai_event_port,
-        sai_event_switch_shutdown,
-        sai_event_rx_packet,
+        __event_switch_state_changed,
+        __event_fdb,
+        __event_port_state,
+        __event_port,
+        __event_switch_shutdown,
+        __event_rx_packet,
     };
 
     SAI_API_TRACE_FN();
@@ -56,6 +66,11 @@ sai_api_init(void)
         status = SAI_STATUS_FAILURE;
         SAI_ERROR_LOG_EXIT(status, "SAI api already initialized");
     }
+
+    status = ops_sai_vendor_base_mac_get(mac);
+    SAI_ERROR_LOG_EXIT(status, "Failed to get base MAC address");
+    sprintf(sai_api_mac_str, "%02hhx:%02hhx:%02hhx:%02hhx:%02hhx:%02hhx",
+            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 
     status = sai_api_initialize(0, &sai_services);
     SAI_ERROR_LOG_EXIT(status, "Failed to initialize SAI api");
@@ -76,57 +91,70 @@ sai_api_init(void)
     status = sai_api.switch_api->initialize_switch(1, "SX", "/", &sai_events);
     SAI_ERROR_LOG_EXIT(status, "Failed to initialize switch");
 
-    status = sai_api_init_ports();
+    status = __init_ports();
     SAI_ERROR_LOG_EXIT(status, "Failed to create interfaces");
 
     sai_api.initialized = true;
 
 exit:
-    if (SAI_ERROR(status)) {
+    if (SAI_ERROR_2_ERRNO(status)) {
         ovs_assert(false);
     }
-
-    return 0;
 }
 
+/**
+ * Uninitialie SAI api.
+ */
 int
-sai_api_uninit(void)
+ops_sai_api_uninit(void)
 {
     sai_status_t status = SAI_STATUS_SUCCESS;
 
     SAI_API_TRACE_FN();
 
+    sai_api.initialized = false;
     status = sai_api_uninitialize();
     SAI_ERROR_LOG_EXIT(status, "Failed to uninitialize SAI api");
 
 exit:
-    return SAI_ERROR(status);
+    return SAI_ERROR_2_ERRNO(status);
 }
 
-const struct sai_api_class *
-sai_api_get_instance(void)
+/**
+ * Get SAI api class. API has to be alreadyu initialize with sai_api_init().
+ * @return pointer to sai_api class.
+ */
+const struct ops_sai_api_class *
+ops_sai_api_get_instance(void)
 {
     ovs_assert(sai_api.initialized);
     return &sai_api;
 }
 
+/**
+ * Convert port label ID to sai_object_id_t.
+ * @return sai_object_id_t of requested port.
+ */
 sai_object_id_t
-sai_api_hw_id2port_id(uint32_t hw_id)
+ops_sai_api_hw_id2port_id(uint32_t hw_id)
 {
     return sai_lable_id_to_oid_map[hw_id];
 }
 
+/*
+ * Return value requested by SAI using string key.
+ */
 static const char *
-sai_profile_get_value(sai_switch_profile_id_t profile_id, const char *variable)
+__profile_get_value(sai_switch_profile_id_t profile_id, const char *variable)
 {
     SAI_API_TRACE_FN();
 
-    /* Temporarily hardcoded values until issue with reading data from EEPROM
-     * will be fixed. */
+    NULL_PARAM_LOG_ABORT(variable);
+
     if (!strcmp(variable, SAI_KEY_INIT_CONFIG_FILE)) {
-        return "/usr/share/sai_2700.xml";
+        return SAI_INIT_CONFIG_FILE_PATH;
     } else if (!strcmp(variable, "DEVICE_MAC_ADDRESS")) {
-        return "20:03:04:05:06:00";
+        return sai_api_mac_str;
     } else if (!strcmp(variable, "INITIAL_FAN_SPEED")) {
         return "50";
     }
@@ -134,8 +162,11 @@ sai_profile_get_value(sai_switch_profile_id_t profile_id, const char *variable)
     return NULL;
 }
 
+/*
+ * Return next value requested by SAI using string key.
+ */
 static int
-sai_profile_get_next_value(sai_switch_profile_id_t profile_id,
+__profile_get_next_value(sai_switch_profile_id_t profile_id,
                            const char **variable, const char **value)
 {
     SAI_API_TRACE_FN();
@@ -143,25 +174,36 @@ sai_profile_get_next_value(sai_switch_profile_id_t profile_id,
     return -1;
 }
 
+/*
+ * Function will be called by SAI when switch state changes.
+ */
 static void
-sai_event_switch_state_changed(sai_switch_oper_status_t switch_oper_status)
+__event_switch_state_changed(sai_switch_oper_status_t switch_oper_status)
 {
     SAI_API_TRACE_FN();
 }
 
+/*
+ * Function will be called by SAI on fdb event.
+ */
 static void
-sai_event_fdb(uint32_t count, sai_fdb_event_notification_data_t * data)
+__event_fdb(uint32_t count, sai_fdb_event_notification_data_t * data)
 {
     SAI_API_TRACE_FN();
 }
 
+/*
+ * Function will be called by SAI when port state changes.
+ */
 static void
-sai_event_port_state(uint32_t count,
-                     sai_port_oper_status_notification_t * data)
+__event_port_state(uint32_t count,
+                   sai_port_oper_status_notification_t * data)
 {
     uint32_t i = 0;
 
     SAI_API_TRACE_FN();
+
+    NULL_PARAM_LOG_ABORT(data);
 
     for (i = 0; i < count; i++) {
         netdev_sai_port_oper_state_changed(data[i].port_id,
@@ -170,31 +212,45 @@ sai_event_port_state(uint32_t count,
     }
 }
 
+/*
+ * Function will be called by SAI on port event.
+ */
 static void
-sai_event_port(uint32_t count, sai_port_event_notification_t * data)
+__event_port(uint32_t count, sai_port_event_notification_t * data)
 {
     SAI_API_TRACE_FN();
 }
 
+/*
+ * Function will be called by SAI on switch shutdown.
+ */
 static void
-sai_event_switch_shutdown(void)
+__event_switch_shutdown(void)
 {
     SAI_API_TRACE_FN();
 }
 
+/*
+ * Function will be called by SAI on rx packet.
+ */
 static void
-sai_event_rx_packet(const void *buffer, sai_size_t buffer_size,
-                    uint32_t attr_count, const sai_attribute_t * attr_list)
+__event_rx_packet(const void *buffer, sai_size_t buffer_size,
+                  uint32_t attr_count, const sai_attribute_t * attr_list)
 {
     SAI_API_TRACE_FN();
 }
 
+/*
+ * Get port label ID bi sai_object_id_t.
+ */
 static sai_status_t
-sai_api_get_port_lable_id(sai_object_id_t oid, uint32_t *label_id)
+__get_port_lable_id(sai_object_id_t oid, uint32_t *label_id)
 {
     sai_attribute_t attr;
     uint32_t hw_lanes[SAI_MAX_LANES];
     sai_status_t status = SAI_STATUS_SUCCESS;
+
+    NULL_PARAM_LOG_ABORT(label_id);
 
     attr.id = SAI_PORT_ATTR_HW_LANE_LIST;
     attr.value.u32list.count = SAI_MAX_LANES;
@@ -216,8 +272,11 @@ exit:
     return status;
 }
 
+/*
+ * Initialize physical ports list.
+ */
 static sai_status_t
-sai_api_init_ports(void)
+__init_ports(void)
 {
     uint32_t label_id = 0;
     sai_uint32_t port_number = 0;
@@ -237,7 +296,7 @@ sai_api_init_ports(void)
     SAI_ERROR_LOG_EXIT(status, "Failed to get switch port list");
 
     for (int i = 0; i < port_number; ++i) {
-        status = sai_api_get_port_lable_id(sai_oids[i], &label_id);
+        status = __get_port_lable_id(sai_oids[i], &label_id);
         SAI_ERROR_LOG_EXIT(status, "Failed to get switch port list");
 
         if (label_id > port_number) {
