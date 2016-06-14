@@ -16,6 +16,7 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=gnu99 -Werror -Wall -g -Wno-error=unuse
 ###
 
 if(DEFINED SAI_VENDOR)
+  add_definitions(-DSAI_VENDOR)
   add_definitions(-D${SAI_VENDOR}_SAI)
   string(TOLOWER ${SAI_VENDOR} SAI_VENDOR_DIR)
   set(SAI_VENDOR_INCLUDE_DIR ${CMAKE_SOURCE_DIR}/${INCL_DIR}/vendor/${SAI_VENDOR_DIR})

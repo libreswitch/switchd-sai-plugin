@@ -8,7 +8,9 @@
 #define SAI_PORT_H 1
 
 #include <sai-common.h>
+#ifdef SAI_VENDOR
 #include <sai-vendor-common.h>
+#endif /* SAI_VENDOR */
 
 /* We can't get default pvid from openswitch, but according to their convention
  * it is equal to 1.

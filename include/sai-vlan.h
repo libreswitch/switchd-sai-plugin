@@ -9,7 +9,9 @@
 
 #include <sai.h>
 #include <sai-common.h>
+#ifdef SAI_VENDOR
 #include <sai-vendor-common.h>
+#endif /* SAI_VENDOR */
 
 struct vlan_class {
     /**

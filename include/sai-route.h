@@ -8,7 +8,9 @@
 #define SAI_ROUTE_H 1
 
 #include <sai-common.h>
+#ifdef SAI_VENDOR
 #include <sai-vendor-common.h>
+#endif /* SAI_VENDOR */
 
 struct route_class {
     /**

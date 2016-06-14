@@ -8,8 +8,10 @@
 #define SAI_HOST_INTF_H 1
 
 #include <sai-common.h>
-#include <sai-vendor-common.h>
 #include <sai-policer.h>
+#ifdef SAI_VENDOR
+#include <sai-vendor-common.h>
+#endif /* SAI_VENDOR */
 
 enum host_intf_type {
     HOST_INTF_TYPE_L2_PORT_NETDEV,

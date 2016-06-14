@@ -8,7 +8,9 @@
 #define SAI_POLICER_H 1
 
 #include <sai-common.h>
+#ifdef SAI_VENDOR
 #include <sai-vendor-common.h>
+#endif /* SAI_VENDOR */
 
 struct ops_sai_policer_config {
     uint32_t burst_max;
