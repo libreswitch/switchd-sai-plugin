@@ -6,11 +6,21 @@
 
 #include <netdev-provider.h>
 
+#include <sai-common.h>
 #include <sai-log.h>
 #include <sai-api-class.h>
 #include <sai-port.h>
+#include <list.h>
 
 VLOG_DEFINE_THIS_MODULE(sai_port);
+
+struct ops_sai_port_transaction_callback {
+    struct ovs_list list_node;
+    port_transaction_clb_t callback;
+    enum ops_sai_port_transaction type;
+};
+
+static struct ovs_list callback_list = OVS_LIST_INITIALIZER(&callback_list);
 
 static sai_status_t __set_hw_intf_config_full(uint32_t,
                                               const struct
@@ -20,14 +30,123 @@ static sai_status_t __set_hw_intf_config_full(uint32_t,
 static sai_port_flow_control_mode_t sai_port_pause(bool, bool);
 #endif
 
+void
+ops_sai_port_init(void)
+{
+    ovs_assert(ops_sai_port_class()->init);
+    ops_sai_port_class()->init();
+}
+
+/*
+ * Initialize port functionality.
+ */
+void
+__port_init(void)
+{
+    VLOG_INFO("Initializing port");
+}
+
+/*
+ * De-initialize port functionality.
+ */
+void
+ops_sai_port_deinit(void)
+{
+    ovs_assert(ops_sai_port_class()->deinit);
+    ops_sai_port_class()->deinit();
+}
+
+/*
+ * De-initialize port functionality.
+ */
+void
+__port_deinit(void)
+{
+    VLOG_INFO("De-initializing port");
+}
+
+
+/*
+ * Register port transaction callback.
+ *
+ * @param[in] clb port transaction callback.
+ * @param[in] type transaction type.
+ *
+ * @return 0, sai status converted to errno otherwise.
+ */
+int ops_sai_port_transaction_register_callback(port_transaction_clb_t clb,
+                                               enum ops_sai_port_transaction type)
+{
+    struct ops_sai_port_transaction_callback *node = NULL;
+
+    /* Coverity[leaked_storage] */
+    node = xzalloc(sizeof(*node));
+    node->callback = clb;
+    node->type = type;
+
+    list_push_back(&callback_list, &node->list_node);
+
+    return 0;
+}
+
+/*
+ * Un-register port transaction callback.
+ *
+ * @param[in] clb port transaction callback.
+ * @return 0, sai status converted to errno otherwise.
+ */
+int ops_sai_port_transaction_unregister_callback(port_transaction_clb_t clb)
+{
+    struct ops_sai_port_transaction_callback *iter = NULL;
+    struct ops_sai_port_transaction_callback *next = NULL;
+
+    LIST_FOR_EACH_SAFE(iter, next, list_node, &callback_list) {
+        if (iter->callback == clb) {
+            list_remove(&iter->list_node);
+            free(iter);
+        }
+    }
+
+    return 0;
+}
+
+/*
+ * Call callbacks registered with specified transaction type.
+ *
+ * @param[in] hw_id port label id.
+ * @param[in] transaction transaction type.
+ *
+ * @return 0, sai status converted to errno otherwise.
+ */
+void ops_sai_port_transaction(uint32_t hw_id,
+                              enum ops_sai_port_transaction transaction)
+{
+    struct ops_sai_port_transaction_callback *iter = NULL;
+
+    LIST_FOR_EACH(iter, list_node, &callback_list) {
+        if (iter->type == transaction) {
+            iter->callback(hw_id);
+        }
+    }
+}
+
+int
+ops_sai_port_config_get(uint32_t hw_id, struct ops_sai_port_config *conf)
+{
+    ovs_assert(ops_sai_port_class()->config_get);
+    return ops_sai_port_class()->config_get(hw_id, conf);
+}
+
 /*
  * Reads port configuration.
+ *
  * @param[in] hw_id port label id.
  * @param[out] conf pointer to port configuration.
+ *
  * @return 0, sai status converted to errno otherwise.
  */
 int
-ops_sai_port_config_get(uint32_t hw_id, struct ops_sai_port_config *conf)
+__port_config_get(uint32_t hw_id, struct ops_sai_port_config *conf)
 {
     enum port_attr_list {
         PORT_ATTR_HW_ENABLE = 0,
@@ -81,17 +200,27 @@ exit:
     return SAI_ERROR_2_ERRNO(status);
 }
 
+int
+ops_sai_port_config_set(uint32_t hw_id, const struct ops_sai_port_config *new,
+                        struct ops_sai_port_config *old)
+{
+    ovs_assert(ops_sai_port_class()->config_set);
+    return ops_sai_port_class()->config_set(hw_id, new, old);
+}
+
 /*
  * Applies new port configuration.
+ *
  * @param[in] hw_id port label id.
  * @param[in] new pointer to new port configuration.
  * @param[out] old pointer to current port configuration, will be updated with
  * values from new configuration.
+ *
  * @return 0, sai status converted to errno otherwise.
  */
 int
-ops_sai_port_config_set(uint32_t hw_id, const struct ops_sai_port_config *new,
-                        struct ops_sai_port_config *old)
+__port_config_set(uint32_t hw_id, const struct ops_sai_port_config *new,
+                  struct ops_sai_port_config *old)
 {
     sai_attribute_t attr = { };
     sai_status_t status = SAI_STATUS_SUCCESS;
@@ -118,14 +247,23 @@ exit:
     return SAI_ERROR_2_ERRNO(status);
 }
 
+int
+ops_sai_port_mtu_get(uint32_t hw_id, int *mtu)
+{
+    ovs_assert(ops_sai_port_class()->mtu_get);
+    return ops_sai_port_class()->mtu_get(hw_id, mtu);
+}
+
 /*
  * Reads port mtu.
+ *
  * @param[in] hw_id port label id.
  * @param[out] mtu pointer to mtu variable, will be set to current value.
+ *
  * @return 0, sai status converted to errno otherwise.
  */
 int
-ops_sai_port_mtu_get(uint32_t hw_id, int *mtu)
+__port_mtu_get(uint32_t hw_id, int *mtu)
 {
     sai_attribute_t attr = { };
     sai_status_t status = SAI_STATUS_SUCCESS;
@@ -144,14 +282,23 @@ exit:
     return SAI_ERROR_2_ERRNO(status);
 }
 
+int
+ops_sai_port_mtu_set(uint32_t hw_id, int mtu)
+{
+    ovs_assert(ops_sai_port_class()->mtu_set);
+    return ops_sai_port_class()->mtu_set(hw_id, mtu);
+}
+
 /*
  * Sets port mtu.
+ *
  * @param[in] hw_id port label id.
  * @param[in] mtu value to be applied.
+ *
  * @return 0, sai status converted to errno otherwise.
  */
 int
-ops_sai_port_mtu_set(uint32_t hw_id, int mtu)
+__port_mtu_set(uint32_t hw_id, int mtu)
 {
     sai_attribute_t attr = { };
     sai_status_t status = SAI_STATUS_SUCCESS;
@@ -167,15 +314,24 @@ exit:
     return SAI_ERROR_2_ERRNO(status);
 }
 
+int
+ops_sai_port_carrier_get(uint32_t hw_id, bool *carrier)
+{
+    ovs_assert(ops_sai_port_class()->carrier_get);
+    return ops_sai_port_class()->carrier_get(hw_id, carrier);
+}
+
 /*
  * Reads port operational state.
+ *
  * @param[in] hw_id port label id.
  * @param[out] carrier pointer to boolean, set to true if port is in operational
  * state.
+ *
  * @return 0, sai status converted to errno otherwise.
  */
 int
-ops_sai_port_carrier_get(uint32_t hw_id, bool *carrier)
+__port_carrier_get(uint32_t hw_id, bool *carrier)
 {
     sai_attribute_t attr = { };
     sai_status_t status = SAI_STATUS_SUCCESS;
@@ -195,16 +351,26 @@ exit:
     return SAI_ERROR_2_ERRNO(status);
 }
 
+int
+ops_sai_port_flags_update(uint32_t hw_id, enum netdev_flags off,
+                          enum netdev_flags on, enum netdev_flags *old_flagsp)
+{
+    ovs_assert(ops_sai_port_class()->flags_update);
+    return ops_sai_port_class()->flags_update(hw_id, off, on, old_flagsp);
+}
+
 /*
  * Updates netdevice flags. Currently only NETDEV_UP.
+ *
  * @param[in] hw_id port label id.
  * @param[in] off flags to be cleared.
  * @param[in] on flags to be set.
  * @param[out] old_flagsp set with current flags.
+ *
  * @return 0, sai status converted to errno otherwise.
  */
 int
-ops_sai_port_flags_update(uint32_t hw_id, enum netdev_flags off,
+__port_flags_update(uint32_t hw_id, enum netdev_flags off,
                           enum netdev_flags on, enum netdev_flags *old_flagsp)
 {
     sai_attribute_t attr = { };
@@ -239,14 +405,23 @@ exit:
     return SAI_ERROR_2_ERRNO(status);
 }
 
+int
+ops_sai_port_pvid_get(uint32_t hw_id, sai_vlan_id_t *pvid)
+{
+    ovs_assert(ops_sai_port_class()->pvid_get);
+    return ops_sai_port_class()->pvid_get(hw_id, pvid);
+}
+
 /*
  * Reads port VLAN ID.
+ *
  * @param[in] hw_id port label id.
  * @param[out] pvid pointer to pvid variable, will be set to current pvid.
+ *
  * @return 0, sai status converted to errno otherwise.
  */
 int
-ops_sai_port_pvid_get(uint32_t hw_id, sai_vlan_id_t *pvid)
+__port_pvid_get(uint32_t hw_id, sai_vlan_id_t *pvid)
 {
     sai_attribute_t attr = { };
     sai_status_t status = SAI_STATUS_SUCCESS;
@@ -265,14 +440,23 @@ exit:
     return SAI_ERROR_2_ERRNO(status);
 }
 
+int
+ops_sai_port_pvid_set(uint32_t hw_id, sai_vlan_id_t pvid)
+{
+    ovs_assert(ops_sai_port_class()->pvid_set);
+    return ops_sai_port_class()->pvid_set(hw_id, pvid);
+}
+
 /*
  * Sets port VLAN ID.
+ *
  * @param[in] hw_id port label id.
  * @param[in] pvid new VLAN ID to be set.
+ *
  * @return 0, sai status converted to errno otherwise.
  */
 int
-ops_sai_port_pvid_set(uint32_t hw_id, sai_vlan_id_t pvid)
+__port_pvid_set(uint32_t hw_id, sai_vlan_id_t pvid)
 {
     sai_attribute_t attr = { };
     sai_status_t status = SAI_STATUS_SUCCESS;
@@ -289,14 +473,23 @@ exit:
     return SAI_ERROR_2_ERRNO(status);
 }
 
-/*
- * Get port statistics.
- * @param[in] hw_id port label id.
- * @param[out] stats pointer to netdev statistics.
- * @return SAI_STATUS_SUCCESS, sai specific error otherwise.
- */
 int
 ops_sai_port_stats_get(uint32_t hw_id, struct netdev_stats *stats)
+{
+    ovs_assert(ops_sai_port_class()->stats_get);
+    return ops_sai_port_class()->stats_get(hw_id, stats);
+}
+
+/*
+ * Get port statistics.
+ *
+ * @param[in] hw_id port label id.
+ * @param[out] stats pointer to netdev statistics.
+ *
+ * @return 0, sai status converted to errno otherwise.
+ */
+int
+__port_stats_get(uint32_t hw_id, struct netdev_stats *stats)
 {
     enum stats_indexes {
         STAT_IDX_IF_IN_UCAST_PKTS = 0,
@@ -369,10 +562,12 @@ exit:
 
 /*
  * Applies all supported port configuration except from hw_enable.
+ *
  * @param[in] hw_id port label id.
  * @param[in] new pointer to new port configuration.
  * @param[out] old pointer to current port configuration, will be updated with
  * values from new configuration.
+ *
  * @return SAI_STATUS_SUCCESS, sai specific error otherwise.
  */
 static sai_status_t
@@ -428,8 +623,10 @@ exit:
 #ifndef MLNX_SAI
 /*
  * Get SAI flow control mode based on tx and rx pause values.
+ *
  * @param[in] pause_tx enable flow control for tx.
  * @param[in] pause_rx enable flow control for rx.
+ *
  * @return sai flow control mode - either both, rx only, tx only or none.
  */
 static sai_port_flow_control_mode_t
@@ -448,3 +645,19 @@ sai_port_pause(bool pause_tx, bool pause_rx)
     return SAI_PORT_FLOW_CONTROL_DISABLE;
 }
 #endif
+
+DEFINE_GENERIC_CLASS(struct port_class, port) = {
+        .init = __port_init,
+        .config_get = __port_config_get,
+        .config_set = __port_config_set,
+        .mtu_get = __port_mtu_get,
+        .mtu_set = __port_mtu_set,
+        .carrier_get = __port_carrier_get,
+        .flags_update = __port_flags_update,
+        .pvid_get = __port_pvid_get,
+        .pvid_set = __port_pvid_set,
+        .stats_get = __port_stats_get,
+        .deinit = __port_deinit,
+};
+
+DEFINE_GENERIC_CLASS_GETTER(struct port_class, port);

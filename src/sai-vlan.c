@@ -10,6 +10,7 @@
 #include <sai-log.h>
 #include <sai-api-class.h>
 #include <sai-port.h>
+#include <sai-vlan.h>
 
 VLOG_DEFINE_THIS_MODULE(sai_vlan);
 
@@ -18,13 +19,31 @@ static int __vlan_port_set(sai_vlan_id_t, uint32_t, sai_vlan_tagging_mode_t,
 static int __trunks_port_set(const unsigned long *, uint32_t, bool);
 
 /*
+ * Initialize VLANs.
+ */
+void
+__vlan_init(void)
+{
+    VLOG_INFO("Initializing VLANs");
+}
+
+/*
+ * De-initialize VLANs.
+ */
+void
+__vlan_deinit(void)
+{
+    VLOG_INFO("De-initializing VLANs");
+}
+
+/*
  * Adds port to access vlan.
  * @param[in] vid VLAN id.
  * @param[in] hw_id port label id.
  * @return 0, sai error converted to errno otherwise.
  */
 int
-ops_sai_vlan_access_port_add(sai_vlan_id_t vid, uint32_t hw_id)
+__vlan_access_port_add(sai_vlan_id_t vid, uint32_t hw_id)
 {
     return __vlan_port_set(vid, hw_id, SAI_VLAN_PORT_UNTAGGED, true);
 }
@@ -36,7 +55,7 @@ ops_sai_vlan_access_port_add(sai_vlan_id_t vid, uint32_t hw_id)
  * @return 0, sai error converted to errno otherwise.
  */
 int
-ops_sai_vlan_access_port_del(sai_vlan_id_t vid, uint32_t hw_id)
+__vlan_access_port_del(sai_vlan_id_t vid, uint32_t hw_id)
 {
     int status = 0;
 
@@ -58,7 +77,7 @@ exit:
  * @return 0, sai error converted to errno otherwise.
  */
 int
-ops_sai_vlan_trunks_port_add(const unsigned long *trunks, uint32_t hw_id)
+__vlan_trunks_port_add(const unsigned long *trunks, uint32_t hw_id)
 {
     return __trunks_port_set(trunks, hw_id, true);
 }
@@ -70,7 +89,7 @@ ops_sai_vlan_trunks_port_add(const unsigned long *trunks, uint32_t hw_id)
  * @return 0, sai error converted to errno otherwise.
  */
 int
-ops_sai_vlan_trunks_port_del(unsigned long *trunks, uint32_t hw_id)
+__vlan_trunks_port_del(const unsigned long *trunks, uint32_t hw_id)
 {
     return __trunks_port_set(trunks, hw_id, false);
 }
@@ -82,7 +101,7 @@ ops_sai_vlan_trunks_port_del(unsigned long *trunks, uint32_t hw_id)
  * @return 0, sai error converted to errno otherwise.
  */
 int
-ops_sai_vlan_set(int vid, bool add)
+__vlan_set(int vid, bool add)
 {
     sai_status_t status = SAI_STATUS_SUCCESS;
     const struct ops_sai_api_class *sai_api = ops_sai_api_get_instance();
@@ -161,3 +180,15 @@ __trunks_port_set(const unsigned long *trunks, uint32_t hw_id, bool add)
 exit:
     return status;
 }
+
+DEFINE_GENERIC_CLASS(struct vlan_class, vlan) = {
+        .init = __vlan_init,
+        .access_port_add = __vlan_access_port_add,
+        .access_port_del = __vlan_access_port_del,
+        .trunks_port_add = __vlan_trunks_port_add,
+        .trunks_port_del = __vlan_trunks_port_del,
+        .set = __vlan_set,
+        .deinit = __vlan_deinit,
+};
+
+DEFINE_GENERIC_CLASS_GETTER(struct vlan_class, vlan);

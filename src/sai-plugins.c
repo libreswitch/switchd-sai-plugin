@@ -18,14 +18,6 @@
 
 VLOG_DEFINE_THIS_MODULE(sai_plugin);
 
-static void *
-ovs_sai_init_main(void *args OVS_UNUSED)
-{
-    SAI_API_TRACE_FN();
-
-    return NULL;
-}
-
 void
 init(void)
 {

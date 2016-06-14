@@ -1,5 +1,5 @@
 /*
- * Copyright Mellanox Technologies, Ltd. 2001-2016.  
+ * Copyright Mellanox Technologies, Ltd. 2001-2016.
  * This software product is licensed under Apache version 2, as detailed in
  * the COPYING file.
  */
@@ -11,17 +11,13 @@
 #include <sai-netdev.h>
 #include <util.h>
 #include <sai-vendor.h>
-
-#ifndef SAI_INIT_CONFIG_FILE_PATH
-#define SAI_INIT_CONFIG_FILE_PATH ""
-#endif
-
-#define MAC_STR_LEN 17
+#include <sai-common.h>
 
 VLOG_DEFINE_THIS_MODULE(sai_api_class);
 
 static struct ops_sai_api_class sai_api;
 static sai_object_id_t sai_lable_id_to_oid_map[SAI_PORTS_MAX];
+static struct eth_addr sai_api_mac;
 static char sai_api_mac_str[MAC_STR_LEN + 1];
 
 static const char *__profile_get_value(sai_switch_profile_id_t, const char *);
@@ -45,7 +41,6 @@ void
 ops_sai_api_init(void)
 {
     sai_status_t status = SAI_STATUS_SUCCESS;
-    sai_mac_t mac = { };
 
     static const service_method_table_t sai_services = {
         __profile_get_value,
@@ -67,10 +62,12 @@ ops_sai_api_init(void)
         SAI_ERROR_LOG_EXIT(status, "SAI api already initialized");
     }
 
-    status = ops_sai_vendor_base_mac_get(mac);
+    status = ops_sai_vendor_base_mac_get(sai_api_mac.ea);
     SAI_ERROR_LOG_EXIT(status, "Failed to get base MAC address");
     sprintf(sai_api_mac_str, "%02hhx:%02hhx:%02hhx:%02hhx:%02hhx:%02hhx",
-            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+            sai_api_mac.ea[0], sai_api_mac.ea[1],
+            sai_api_mac.ea[2], sai_api_mac.ea[3],
+            sai_api_mac.ea[4], sai_api_mac.ea[5]);
 
     status = sai_api_initialize(0, &sai_services);
     SAI_ERROR_LOG_EXIT(status, "Failed to initialize SAI api");
@@ -87,6 +84,14 @@ ops_sai_api_init(void)
     status = sai_api_query(SAI_API_HOST_INTERFACE,
                            (void **) &sai_api.host_interface_api);
     SAI_ERROR_LOG_EXIT(status, "Failed to initialize SAI host interface api");
+
+    status = sai_api_query(SAI_API_POLICER,
+                           (void **) &sai_api.policer_api);
+    SAI_ERROR_LOG_EXIT(status, "Failed to initialize SAI policer api");
+
+    status = sai_api_query(SAI_API_HASH,
+                           (void **) &sai_api.hash_api);
+    SAI_ERROR_LOG_EXIT(status, "Failed to initialize SAI hash api");
 
     status = sai_api.switch_api->initialize_switch(1, "SX", "/", &sai_events);
     SAI_ERROR_LOG_EXIT(status, "Failed to initialize switch");
@@ -139,6 +144,20 @@ sai_object_id_t
 ops_sai_api_hw_id2port_id(uint32_t hw_id)
 {
     return sai_lable_id_to_oid_map[hw_id];
+}
+
+/**
+ * Read device base MAC address.
+ * @param[out] mac pointer to MAC buffer.
+ * @return 0 operation completed successfully
+ * @return errno operation failed
+ */
+int
+ops_sai_api_base_mac_get(struct eth_addr *mac)
+{
+    memcpy(mac, &sai_api_mac, sizeof(*mac));
+
+    return 0;
 }
 
 /*

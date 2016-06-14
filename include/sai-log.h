@@ -9,6 +9,7 @@
 
 #include <sai.h>
 #include <errno.h>
+#include <stdbool.h>
 #include <openvswitch/vlog.h>
 
 #define SAI_ERROR_2_ERRNO(status) sai_error_2_errno(status)
@@ -44,6 +45,21 @@
         if (status) { \
             VLOG_ERR("error %d " msg, status, ##args); \
             goto exit; \
+        } \
+    } while (0);
+
+#define ERRNO_LOG_ABORT(status, msg, args...) \
+    do { \
+        if (status) { \
+            VLOG_ERR("error %d " msg, status, ##args); \
+            ovs_assert(false); \
+        } \
+    } while (0);
+
+#define ERRNO_LOG(status, msg, args...) \
+    do { \
+        if (status) { \
+            VLOG_ERR("error %d " msg, status, ##args); \
         } \
     } while (0);
 

@@ -1,5 +1,5 @@
 /*
- * Copyright Mellanox Technologies, Ltd. 2001-2016.  
+ * Copyright Mellanox Technologies, Ltd. 2001-2016.
  * This software product is licensed under Apache version 2, as detailed in
  * the COPYING file.
  */
@@ -9,6 +9,7 @@
 #include <linux/ethtool.h>
 #include <netinet/ether.h>
 
+#include <vswitch-idl.h>
 #include <netdev-provider.h>
 #include <openflow/openflow.h>
 #include <openswitch-idl.h>
@@ -18,6 +19,7 @@
 #include <sai-common.h>
 #include <sai-port.h>
 #include <sai-host-intf.h>
+#include <sai-router-intf.h>
 
 VLOG_DEFINE_THIS_MODULE(netdev_sai);
 
@@ -36,6 +38,8 @@ struct netdev_sai {
     struct ops_sai_port_config default_config;
     struct ops_sai_port_config config;
     struct eth_addr mac_addr;
+    bool netdev_internal_admin_state;
+    const handle_t *rif_handle;
 };
 
 static inline bool __is_sai_class(const struct netdev_class *);
@@ -44,12 +48,15 @@ static struct netdev *__alloc(void);
 static int __construct(struct netdev *);
 static void __destruct(struct netdev *);
 static void __dealloc(struct netdev *);
-static void __mac_read(struct eth_addr *, const char *);
 static int __set_hw_intf_info(struct netdev *, const struct smap *);
+static int __set_hw_intf_info_internal(struct netdev *netdev_,
+                                                const struct smap *args);
 static bool __args_autoneg_get(const struct smap *, bool);
 static bool __args_duplex_get(const struct smap *, bool);
 static int __args_pause_get(const struct smap *, bool, bool);
 static int __set_hw_intf_config(struct netdev *, const struct smap *);
+static int __set_hw_intf_config_internal(struct netdev *,
+                                                  const struct smap *);
 static int __set_etheraddr_full(struct netdev *, const struct eth_addr mac);
 static int __set_etheraddr(struct netdev *, const struct eth_addr mac);
 static int __get_etheraddr(const struct netdev *, struct eth_addr *mac);
@@ -63,8 +70,17 @@ static int __get_features(const struct netdev *, enum netdev_features *,
                           enum netdev_features *);
 static int __update_flags(struct netdev *, enum netdev_flags,
                           enum netdev_flags, enum netdev_flags *);
+static int __update_flags_internal(struct netdev *,
+                                   enum netdev_flags,
+                                   enum netdev_flags,
+                                   enum netdev_flags *);
+static int __update_flags_loopback(struct netdev *,
+                                   enum netdev_flags,
+                                   enum netdev_flags,
+                                   enum netdev_flags *);
 
-#define NETDEV_SAI_CLASS(TYPE, CONSTRUCT, DESCRUCT, INTF_INFO, INTF_CONFIG) \
+#define NETDEV_SAI_CLASS(TYPE, CONSTRUCT, DESCRUCT, INTF_INFO, INTF_CONFIG, \
+                         UPDATE_FLAGS, GET_MTU, SET_MTU) \
 { \
     PROVIDER_INIT_GENERIC(type,                 TYPE) \
     PROVIDER_INIT_GENERIC(init,                 NULL) \
@@ -88,8 +104,8 @@ static int __update_flags(struct netdev *, enum netdev_flags,
     PROVIDER_INIT_GENERIC(send_wait,            NULL) \
     PROVIDER_INIT_GENERIC(set_etheraddr,        __set_etheraddr) \
     PROVIDER_INIT_GENERIC(get_etheraddr,        __get_etheraddr) \
-    PROVIDER_INIT_GENERIC(get_mtu,              __get_mtu) \
-    PROVIDER_INIT_GENERIC(set_mtu,              __set_mtu) \
+    PROVIDER_INIT_GENERIC(get_mtu,              GET_MTU) \
+    PROVIDER_INIT_GENERIC(set_mtu,              SET_MTU) \
     PROVIDER_INIT_GENERIC(get_ifindex,          NULL) \
     PROVIDER_INIT_GENERIC(get_carrier,          __get_carrier) \
     PROVIDER_INIT_GENERIC(get_carrier_resets,   __get_carrier_resets) \
@@ -117,7 +133,7 @@ static int __update_flags(struct netdev *, enum netdev_flags,
     PROVIDER_INIT_GENERIC(get_next_hop,         NULL) \
     PROVIDER_INIT_GENERIC(get_status,           NULL) \
     PROVIDER_INIT_GENERIC(arp_lookup,           NULL) \
-    PROVIDER_INIT_GENERIC(update_flags,         __update_flags) \
+    PROVIDER_INIT_GENERIC(update_flags,         UPDATE_FLAGS) \
     PROVIDER_INIT_GENERIC(rxq_alloc,            NULL) \
     PROVIDER_INIT_GENERIC(rxq_construct,        NULL) \
     PROVIDER_INIT_GENERIC(rxq_destruct,         NULL) \
@@ -132,14 +148,40 @@ static const struct netdev_class netdev_sai_class = NETDEV_SAI_CLASS(
         __construct,
         __destruct,
         __set_hw_intf_info,
-        __set_hw_intf_config);
+        __set_hw_intf_config,
+        __update_flags,
+        __get_mtu,
+        __set_mtu);
 
 static const struct netdev_class netdev_sai_internal_class = NETDEV_SAI_CLASS(
         "internal",
         __construct,
         __destruct,
-        __set_hw_intf_info,
-        __set_hw_intf_config);
+        __set_hw_intf_info_internal,
+        __set_hw_intf_config_internal,
+        __update_flags_internal,
+        NULL,
+        NULL);
+
+static const struct netdev_class netdev_sai_vlansubint_class = NETDEV_SAI_CLASS(
+        "vlansubint",
+        __construct,
+        __destruct,
+        NULL,
+        NULL,
+        __update_flags_internal,
+        NULL,
+        NULL);
+
+static const struct netdev_class netdev_sai_loopback_class = NETDEV_SAI_CLASS(
+        "loopback",
+        __construct,
+        __destruct,
+        NULL,
+        NULL,
+        __update_flags_loopback,
+        NULL,
+        NULL);
 
 /**
  * Register netdev classes - system and internal.
@@ -149,6 +191,8 @@ netdev_sai_register(void)
 {
     netdev_register_provider(&netdev_sai_class);
     netdev_register_provider(&netdev_sai_internal_class);
+    netdev_register_provider(&netdev_sai_vlansubint_class);
+    netdev_register_provider(&netdev_sai_loopback_class);
 }
 
 /**
@@ -191,6 +235,38 @@ netdev_sai_port_oper_state_changed(sai_object_id_t oid, int link_status)
 
     netdev_change_seq_changed(&(dev->up));
     seq_change(connectivity_seq_get());
+}
+
+/**
+ * Attach/detach router interface handle to netdev.
+ *
+ * @param[in] netdev_     - Pointer to netdev object.
+ * @param[in] rif_handle  - Router interface handle.
+ *
+ * @note If NULL value is specified for rif_handle this means that
+ *       router interface handle should be detached from netdev
+ *
+ * @return 0 operation completed successfully
+ * @return errno operation failed
+ */
+int
+netdev_sai_set_router_intf_handle(struct netdev *netdev_,
+                                  const handle_t *rif_handle)
+{
+    struct netdev_sai *netdev = __netdev_sai_cast(netdev_);
+
+    VLOG_INFO("Set rif handle for netdev (netdev: %s, rif_handle: %p)",
+              netdev_get_name(netdev_), rif_handle);
+
+    ovs_mutex_lock(&netdev->mutex);
+
+    ovs_assert(netdev->is_port_initialized);
+
+    netdev->rif_handle = rif_handle;
+
+    ovs_mutex_unlock(&netdev->mutex);
+
+    return 0;
 }
 
 /*
@@ -247,6 +323,11 @@ __destruct(struct netdev *netdev_)
     SAI_API_TRACE_FN();
 
     ovs_mutex_lock(&sai_netdev_list_mutex);
+
+    if (netdev->is_port_initialized) {
+        ops_sai_host_intf_netdev_remove(netdev_get_name(netdev_));
+    }
+
     list_remove(&netdev->list_node);
     ovs_mutex_unlock(&sai_netdev_list_mutex);
     ovs_mutex_destroy(&netdev->mutex);
@@ -262,27 +343,15 @@ __dealloc(struct netdev *netdev_)
     free(netdev);
 }
 
-/*
- * Read MAC address from string.
- */
-static void
-__mac_read(struct eth_addr *eth_addr, const char *mac_str)
-{
-    uint8_t *mac = eth_addr->ea;
-    sscanf(mac_str, "%hhux:%hhux:%hhux:%hhux:%hhux:%hhux:",
-          &mac[0], &mac[1], &mac[2], &mac[3], &mac[4], &mac[5]);
-}
-
 static int
 __set_hw_intf_info(struct netdev *netdev_, const struct smap *args)
 {
     int status = 0;
-    struct eth_addr mac;
+    struct eth_addr mac = { };
+    handle_t hw_id_handle;
     struct netdev_sai *netdev = __netdev_sai_cast(netdev_);
     const int hw_id =
         smap_get_int(args, INTERFACE_HW_INTF_INFO_MAP_SWITCH_INTF_ID, -1);
-    /* Temporary hardcode until reading from EEPROM will be fixed. */
-    const char *mac_str = "20:03:04:05:06:00";
 
     SAI_API_TRACE_FN();
 
@@ -296,10 +365,19 @@ __set_hw_intf_info(struct netdev *netdev_, const struct smap *args)
     }
 
     netdev->hw_id = hw_id;
-    __mac_read(&mac, mac_str);
 
-    status = ops_sai_hostint_netdev_create(netdev_->name, hw_id);
-    ERRNO_LOG_EXIT(status, "Failed to create port interface hw_id: %d", hw_id);
+    status = ops_sai_api_base_mac_get(&mac);
+    ERRNO_EXIT(status);
+
+    memcpy(&netdev->mac_addr, &mac, sizeof(netdev->mac_addr));
+
+    hw_id_handle.data = hw_id;
+    status = ops_sai_host_intf_netdev_create(netdev_get_name(netdev_),
+                                             HOST_INTF_TYPE_L2_PORT_NETDEV,
+                                             &hw_id_handle, &mac);
+    ERRNO_LOG_EXIT(status,
+                   "Failed to create port interface (name: %s)",
+                   netdev_get_name(netdev_));
 
     status = ops_sai_port_config_get(hw_id, &netdev->default_config);
     ERRNO_LOG_EXIT(status, "Failed to read default config on port: %d", hw_id);
@@ -313,6 +391,55 @@ exit:
     ovs_mutex_unlock(&netdev->mutex);
     return status;
 }
+
+static int
+__set_hw_intf_info_internal(struct netdev *netdev_,
+                                     const struct smap *args)
+{
+    int status = 0;
+    int vlanid = 0;
+    handle_t handle;
+    struct eth_addr mac = { };
+    struct netdev_sai *netdev = __netdev_sai_cast(netdev_);
+    bool is_bridge_intf = smap_get_bool(args,
+                                        INTERFACE_HW_INTF_INFO_MAP_BRIDGE,
+                                        DFLT_INTERFACE_HW_INTF_INFO_MAP_BRIDGE);
+
+    SAI_API_TRACE_FN();
+
+    ovs_mutex_lock(&netdev->mutex);
+
+    if (netdev->is_port_initialized) {
+        goto exit;
+    }
+
+    if (!is_bridge_intf) {
+        vlanid = strtol(netdev_get_name(netdev_) + strlen(VLAN_INTF_PREFIX),
+                        NULL, 0);
+        ovs_assert(vlanid >= VLAN_ID_MIN && vlanid <= VLAN_ID_MAX);
+
+        handle.data = vlanid;
+
+        status = ops_sai_api_base_mac_get(&mac);
+        ERRNO_EXIT(status);
+
+        memcpy(&netdev->mac_addr, &mac, sizeof(netdev->mac_addr));
+
+        status = ops_sai_host_intf_netdev_create(netdev_get_name(netdev_),
+                                                 HOST_INTF_TYPE_L3_VLAN_NETDEV,
+                                                 &handle, &mac);
+        ERRNO_LOG_EXIT(status,
+                       "Failed to create port interface (name: %s)",
+                       netdev_get_name(netdev_));
+    }
+
+    netdev->is_port_initialized = true;
+
+exit:
+    ovs_mutex_unlock(&netdev->mutex);
+    return status;
+}
+
 
 /*
  * Read autoneg value from smap arguments.
@@ -390,6 +517,23 @@ exit:
     ovs_mutex_unlock(&netdev->mutex);
     return status;
 }
+
+static int
+__set_hw_intf_config_internal(struct netdev *netdev_, const struct smap *args)
+{
+    struct netdev_sai *netdev = __netdev_sai_cast(netdev_);
+    const char *enable = smap_get(args, INTERFACE_HW_INTF_CONFIG_MAP_ENABLE);
+
+    SAI_API_TRACE_FN();
+
+    if (enable) {
+        netdev->netdev_internal_admin_state =
+                STR_EQ(enable, INTERFACE_HW_INTF_CONFIG_MAP_ENABLE_TRUE);
+    }
+
+    return 0;
+}
+
 
 /*
  * Cache MAC address.
@@ -492,7 +636,12 @@ __get_carrier(const struct netdev *netdev_, bool * carrier)
 
     ovs_mutex_lock(&netdev->mutex);
     if (netdev->is_port_initialized) {
-        status = ops_sai_port_carrier_get(netdev->hw_id, carrier);
+        if (STR_EQ(netdev_get_type(netdev_), OVSREC_INTERFACE_TYPE_SYSTEM)) {
+            status = ops_sai_port_carrier_get(netdev->hw_id, carrier);
+        } else {
+            /* TODO: Waiting for implementation via netlink */
+            *carrier = true;
+        }
     }
     ovs_mutex_unlock(&netdev->mutex);
 
@@ -518,9 +667,21 @@ __get_stats(const struct netdev *netdev_, struct netdev_stats *stats)
     SAI_API_TRACE_FN();
 
     ovs_mutex_lock(&netdev->mutex);
-    if (netdev->is_port_initialized) {
-        status = ops_sai_port_stats_get(netdev->hw_id, stats);
+    if (!netdev->is_port_initialized) {
+        goto exit;
     }
+
+    if (STR_EQ(netdev_get_type(netdev_), OVSREC_INTERFACE_TYPE_SYSTEM)) {
+        status = ops_sai_port_stats_get(netdev->hw_id, stats);
+        ERRNO_EXIT(status);
+    }
+
+    if (netdev->rif_handle) {
+        status = ops_sai_router_intf_get_stats(netdev->rif_handle, stats);
+        ERRNO_EXIT(status);
+    }
+
+exit:
     ovs_mutex_unlock(&netdev->mutex);
 
     return status;
@@ -554,4 +715,52 @@ __update_flags(struct netdev *netdev_, enum netdev_flags off,
     ovs_mutex_unlock(&netdev->mutex);
 
     return status;
+}
+
+
+static int
+__update_flags_internal(struct netdev *netdev_,
+                        enum netdev_flags off,
+                        enum netdev_flags on, enum netdev_flags *old_flagsp)
+{
+    int status = 0;
+    struct netdev_sai *netdev = __netdev_sai_cast(netdev_);
+
+    SAI_API_TRACE_FN();
+
+    ovs_mutex_lock(&netdev->mutex);
+
+    if (netdev->is_port_initialized) {
+        if (netdev->netdev_internal_admin_state) {
+            *old_flagsp = NETDEV_UP;
+        }
+
+        if (on & NETDEV_UP) {
+            netdev->netdev_internal_admin_state = true;
+        } else if (off & NETDEV_UP) {
+            netdev->netdev_internal_admin_state = false;
+        }
+    } else {
+        *old_flagsp = 0;
+    }
+
+    ovs_mutex_unlock(&netdev->mutex);
+
+    return status;
+}
+
+static int
+__update_flags_loopback(struct netdev *netdev_,
+                        enum netdev_flags off,
+                        enum netdev_flags on, enum netdev_flags *old_flagsp)
+{
+    SAI_API_TRACE_FN();
+
+    if ((off | on) & ~NETDEV_UP) {
+        return EOPNOTSUPP;
+    }
+
+    *old_flagsp = NETDEV_UP | NETDEV_LOOPBACK;
+
+    return 0;
 }

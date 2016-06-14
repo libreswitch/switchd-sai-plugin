@@ -9,9 +9,11 @@
 
 #include <saitypes.h>
 #include <netdev-provider.h>
+#include <sai-common.h>
 
 void netdev_sai_register(void);
 uint32_t netdev_sai_hw_id_get(struct netdev *);
 void netdev_sai_port_oper_state_changed(sai_object_id_t, int);
+int netdev_sai_set_router_intf_handle(struct netdev *, const handle_t *);
 
 #endif /* sai-netdev.h */
