@@ -11,6 +11,7 @@
 #include <packets.h>
 #include <socket-util.h>
 #include <netinet/in.h>
+#include <limits.h>
 
 #include <util.h>
 #include <config-yaml.h>
@@ -21,6 +22,9 @@
 #define FRU_EEPROM_NAME "fru_eeprom"
 #define FRU_BASE_MAC_ADDRESS_TYPE 0x24
 #define FRU_BASE_MAC_ADDRESS_LEN 6
+
+#define INIT_CONFIG_PATH_TEMPLATE "/usr/share/sai_%s.xml"
+#define GET_SYSTEM_ID_COMMAND     "/usr/bin/get-system-info.sh --system-id"
 
 VLOG_DEFINE_THIS_MODULE(mlnx_sai_util);
 
@@ -288,5 +292,50 @@ __eeprom_mac_get(const uint8_t *buffer, sai_mac_t mac, int len)
     SAI_ERROR_LOG_EXIT(status, "MAC address not found in FRU EEPROM");
 
 exit:
+    return status;
+}
+
+/**
+ * Return config file path depending on system ID
+ *
+ * @param[out] - Char pointer to configuration path buffer.
+ * @param[in]  - Length of configuration path buffer.
+ *
+ * @return sai_status_t.
+ */
+sai_status_t
+ops_sai_vendor_config_path_get(char *config_path, uint32_t path_len)
+{
+    sai_status_t status = SAI_STATUS_SUCCESS;
+    char sys_id_buf[NAME_MAX]  = { };
+    uint32_t len = 0;
+    FILE *pipe = NULL;
+
+    NULL_PARAM_LOG_ABORT(config_path);
+    ovs_assert(path_len);
+
+    pipe = popen(GET_SYSTEM_ID_COMMAND, "r");
+    if (NULL == pipe) {
+        status = SAI_STATUS_FAILURE;
+        SAI_ERROR_LOG_EXIT(status,
+                           "Failed to read system ID as couldn't run '%s'",
+                           GET_SYSTEM_ID_COMMAND);
+    }
+    if (NULL == fgets(sys_id_buf, sizeof(sys_id_buf) , pipe)) {
+        status = SAI_STATUS_FAILURE;
+        SAI_ERROR_LOG_EXIT(status, "Failed to read system ID");
+    }
+
+    /* Replacing '\n' with '\0' */
+    len = strnlen(sys_id_buf, sizeof(sys_id_buf));
+    sys_id_buf[len - 1] = '\0';
+
+    snprintf(config_path, path_len, INIT_CONFIG_PATH_TEMPLATE, sys_id_buf);
+    VLOG_INFO("Config file path is: %s", config_path);
+
+exit:
+    if (NULL != pipe) {
+        (void)pclose(pipe);
+    }
     return status;
 }

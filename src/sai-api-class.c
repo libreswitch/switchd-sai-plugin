@@ -19,6 +19,7 @@ static struct ops_sai_api_class sai_api;
 static sai_object_id_t sai_lable_id_to_oid_map[SAI_PORTS_MAX];
 static struct eth_addr sai_api_mac;
 static char sai_api_mac_str[MAC_STR_LEN + 1];
+static char sai_config_file_path[PATH_MAX] = { };
 
 static const char *__profile_get_value(sai_switch_profile_id_t, const char *);
 static int __profile_get_next_value(sai_switch_profile_id_t, const char **,
@@ -68,6 +69,10 @@ ops_sai_api_init(void)
             sai_api_mac.ea[0], sai_api_mac.ea[1],
             sai_api_mac.ea[2], sai_api_mac.ea[3],
             sai_api_mac.ea[4], sai_api_mac.ea[5]);
+
+    status = ops_sai_vendor_config_path_get(sai_config_file_path,
+                                            sizeof(sai_config_file_path));
+    SAI_ERROR_LOG_EXIT(status, "Failed to get config file path");
 
     status = sai_api_initialize(0, &sai_services);
     SAI_ERROR_LOG_EXIT(status, "Failed to initialize SAI api");
@@ -171,7 +176,7 @@ __profile_get_value(sai_switch_profile_id_t profile_id, const char *variable)
     NULL_PARAM_LOG_ABORT(variable);
 
     if (!strcmp(variable, SAI_KEY_INIT_CONFIG_FILE)) {
-        return SAI_INIT_CONFIG_FILE_PATH;
+        return sai_config_file_path;
     } else if (!strcmp(variable, "DEVICE_MAC_ADDRESS")) {
         return sai_api_mac_str;
     } else if (!strcmp(variable, "INITIAL_FAN_SPEED")) {

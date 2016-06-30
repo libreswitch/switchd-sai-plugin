@@ -10,5 +10,6 @@
 #include <sai.h>
 
 sai_status_t ops_sai_vendor_base_mac_get(sai_mac_t);
+sai_status_t ops_sai_vendor_config_path_get(char *, uint32_t);
 
 #endif /* sai-vendor.h */
