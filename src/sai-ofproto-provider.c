@@ -30,6 +30,8 @@
 #include <sai-route.h>
 #include <sai-neighbor.h>
 #include <sai-hash.h>
+#include <sai-classifier.h>
+#include <sai-ofproto-provider.h>
 
 #define SAI_INTERFACE_TYPE_SYSTEM "system"
 #define SAI_INTERFACE_TYPE_VRF "vrf"
@@ -37,66 +39,7 @@
 
 VLOG_DEFINE_THIS_MODULE(ofproto_sai);
 
-struct ofproto_sai {
-    struct ofproto up;
-    struct hmap_node all_ofproto_sai_node;      /* In 'all_ofproto_dpifs'. */
-    struct hmap bundles;        /* Contains "struct ofbundle"s. */
-    struct sset ports;          /* Set of standard port names. */
-    struct sset ghost_ports;    /* Ports with no datapath port. */
-    handle_t vrid;
-};
 
-struct ofport_sai {
-    struct ofport up;
-    struct ofbundle_sai *bundle;        /* Bundle that contains this port */
-    struct ovs_list bundle_node;        /* In struct ofbundle's "ports" list. */
-};
-
-struct ofbundle_sai {
-    struct hmap_node hmap_node; /* In struct ofproto's "bundles" hmap. */
-    struct ofproto_sai *ofproto;        /* Owning ofproto. */
-    void *aux;                  /* Key supplied by ofproto's client. */
-    char *name;                 /* Identifier for log messages. */
-
-    /* Configuration. */
-    struct ovs_list ports;      /* Contains "struct ofport"s. */
-    enum port_vlan_mode vlan_mode;      /* VLAN mode */
-    int vlan;                   /* -1=trunk port, else a 12-bit VLAN ID. */
-    unsigned long *trunks;      /* Bitmap of trunked VLANs, if 'vlan' == -1.
-                                 * NULL if all VLANs are trunked. */
-
-    /* L3 interface */
-    struct {
-        bool created;
-        bool enabled;
-        handle_t handle; /* VLAN or port ID */
-        handle_t rifid;
-        bool is_loopback;
-    } router_intf;
-
-    /* L3 IP addresses */
-    char *ipv4_primary;
-    char *ipv6_primary;
-    struct hmap ipv4_secondary;
-    struct hmap ipv6_secondary;
-
-    /* Local routes entries */
-    struct hmap local_routes;
-    /* Neighbor entries */
-    struct hmap neighbors;
-};
-
-struct ofproto_sai_group {
-    struct ofgroup up;
-};
-
-struct port_dump_state {
-    uint32_t bucket;
-    uint32_t offset;
-    bool ghost;
-    struct ofproto_port port;
-    bool has_port;
-};
 
 /* All existing ofproto provider instances, indexed by ->up.name. */
 static struct hmap all_ofproto_sai = HMAP_INITIALIZER(&all_ofproto_sai);
@@ -109,7 +52,6 @@ static int __enumerate_names(const char *, struct sset *);
 static int __del(const char *, const char *);
 static const char *__port_open_type(const char *, const char *);
 static struct ofproto *__alloc(void);
-static inline struct ofproto_sai *__ofproto_sai_cast(const struct ofproto *);
 static int __construct(struct ofproto *);
 static void __destruct(struct ofproto *);
 static void __sai_dealloc(struct ofproto *);
@@ -174,7 +116,7 @@ static void __ofbundle_rename(struct ofbundle_sai *, const char *);
 static struct ofbundle_sai *__ofbundle_create(struct ofproto_sai *, void *,
                                               const struct
                                               ofproto_bundle_settings *);
-static void __ofbundle_destroy(struct ofbundle_sai *);
+static void __ofbundle_destroy(struct ofbundle_sai *, bool);
 static struct ofbundle_sai *__ofbundle_lookup(struct ofproto_sai *, void *);
 static struct ofbundle_sai *__ofbundle_lookup_by_netdev_name(struct
                                                                ofproto_sai *,
@@ -184,6 +126,14 @@ static int __bundle_set(struct ofproto *, void *,
                                   const struct ofproto_bundle_settings *);
 static void __bundle_remove(struct ofport *);
 static int __bundle_get(struct ofproto *, void *, int *);
+static bool __is_bundle_active(struct ofproto *,
+                               const struct ofbundle_sai *,
+                               const struct ofproto_bundle_settings *);
+static void __bundle_setting_copy(struct ofbundle_sai *,
+                                  const struct ofproto_bundle_settings *);
+static void __bundle_setting_free(struct ofbundle_sai *);
+static void __bundle_cache_init(struct ofbundle_sai *);
+static void __bundle_cache_free(struct ofbundle_sai *);
 static int __set_vlan(struct ofproto *, int, bool);
 static inline struct ofproto_sai_group *__ofproto_sai_group_cast(const struct
                                                                  ofgroup *);
@@ -210,6 +160,8 @@ static int __get_l3_host_hit_bit(const struct ofproto *, void *, bool, char *,
                                  bool *);
 static int __l3_route_action(const struct ofproto *, enum ofproto_route_action,
                              struct ofproto_route *);
+static void __l3_local_route_attach_to_bundle(struct ofbundle_sai *, char *);
+static void __l3_local_route_dettach_from_bundle(struct ofbundle_sai *, char *);
 static int __l3_ecmp_set(const struct ofproto *, bool);
 static int __l3_ecmp_hash_set(const struct ofproto *, unsigned int, bool);
 static int __run(struct ofproto *);
@@ -327,6 +279,105 @@ ofproto_sai_register(void)
     ofproto_class_register(&ofproto_sai_class);
 }
 
+/*
+ * Restore bundle configuration.
+ *
+ * @param[in] netdev_name name of netdev that bundle represents.
+ *
+ * @return 0, sai status converted to errno otherwise.
+ */
+int
+ofproto_sai_bundle_enable(const char *netdev_name)
+{
+    int status = 0;
+    struct ofbundle_sai *bundle = NULL;
+    struct ofproto_sai *ofproto = NULL;
+    struct ip_address *addr = NULL;
+    struct ip_address *next = NULL;
+    bool found = false;
+
+    SAI_API_TRACE_FN();
+
+    VLOG_INFO("Enabling netdev configuration (netdev: %s)", netdev_name);
+
+    HMAP_FOR_EACH(ofproto, all_ofproto_sai_node, &all_ofproto_sai) {
+        HMAP_FOR_EACH(bundle, hmap_node, &ofproto->bundles) {
+            if (STR_EQ(bundle->name, netdev_name)) {
+                found = true;
+                break;
+            }
+        }
+
+        if (found) {
+            break;
+        }
+    }
+
+    if (!found) {
+        VLOG_INFO("Bundle not found");
+        status = 0;
+        goto exit;
+    }
+
+    bundle->config_cache.cache_config = false;
+
+    status = __bundle_set(&ofproto->up, bundle->aux, bundle->config_cache.config);
+    ERRNO_LOG_EXIT(status, "Failed to restore bundle configuration "
+                   "(bundle_name: %s)", bundle->config_cache.config->name);
+
+     HMAP_FOR_EACH_SAFE (addr, next, addr_node, &bundle->local_routes) {
+         status = ops_sai_route_local_add(&bundle->ofproto->vrid,
+                                          addr->address,
+                                          &bundle->router_intf.rifid);
+         ERRNO_LOG_EXIT(status,
+                        "Failed to restore bundle local route configuration "
+                        "(bundle_name: %s)", bundle->config_cache.config->name);
+     }
+
+exit:
+    return status;
+}
+
+/*
+ * Disable and cache bundle configuration.
+ *
+ * @param[in] netdev_name name of netdev that bundle represents.
+ *
+ * @return 0, sai status converted to errno otherwise.
+ */
+int
+ofproto_sai_bundle_disable(const char *netdev_name)
+{
+    int status = 0;
+    struct ofbundle_sai *bundle = NULL;
+    struct ofproto_sai *ofproto = NULL;
+
+    SAI_API_TRACE_FN();
+
+    VLOG_INFO("Disabling netdev configuration (netdev: %s)", netdev_name);
+
+    HMAP_FOR_EACH(ofproto, all_ofproto_sai_node, &all_ofproto_sai) {
+        bundle =__ofbundle_lookup_by_netdev_name(ofproto, netdev_name);
+        if (bundle) {
+            break;
+        }
+    }
+
+    if (!bundle) {
+        VLOG_INFO("Bundle not found");
+        status = 0;
+        goto exit;
+    }
+
+
+    /* Remove configuration only */
+    __ofbundle_destroy(bundle, true);
+    bundle->config_cache.cache_config = true;
+
+exit:
+    return status;
+}
+
 static void
 __init(const struct shash *iface_hints)
 {
@@ -343,6 +394,7 @@ __init(const struct shash *iface_hints)
     ops_sai_route_init();
     ops_sai_host_intf_traps_register();
     ops_sai_ecmp_hash_init();
+    ops_sai_classifier_init();
 }
 
 static void
@@ -418,21 +470,12 @@ __alloc(void)
     return &ofproto->up;
 }
 
-/*
- * Cast netdev ofproto to ofproto_sai.
- */
-static inline struct ofproto_sai *
-__ofproto_sai_cast(const struct ofproto *ofproto)
-{
-    ovs_assert(ofproto);
-    ovs_assert(ofproto->ofproto_class == &ofproto_sai_class);
-    return CONTAINER_OF(ofproto, struct ofproto_sai, up);
-}
+
 
 static int
 __construct(struct ofproto *ofproto_)
 {
-    struct ofproto_sai *ofproto = __ofproto_sai_cast(ofproto_);
+    struct ofproto_sai *ofproto = ofproto_sai_cast(ofproto_);
     int error = 0;
 
     SAI_API_TRACE_FN();
@@ -447,6 +490,11 @@ __construct(struct ofproto *ofproto_)
     ofproto_init_tables(ofproto_, 1);
 
     hmap_init(&ofproto->bundles);
+
+    if (STR_EQ(ofproto_->type, SAI_TYPE_IACL)) {
+        VLOG_DBG("iACL container construct placeholder");
+        goto exit;
+    }
     hmap_insert(&all_ofproto_sai, &ofproto->all_ofproto_sai_node,
                 hash_string(ofproto->up.name, 0));
 
@@ -462,7 +510,7 @@ exit:
 static void
 __destruct(struct ofproto *ofproto_ OVS_UNUSED)
 {
-    struct ofproto_sai *ofproto = __ofproto_sai_cast(ofproto_);
+    struct ofproto_sai *ofproto = ofproto_sai_cast(ofproto_);
 
     SAI_API_TRACE_FN();
 
@@ -473,13 +521,18 @@ __destruct(struct ofproto *ofproto_ OVS_UNUSED)
     sset_destroy(&ofproto->ghost_ports);
     sset_destroy(&ofproto->ports);
 
+    if (STR_EQ(ofproto_->type, SAI_TYPE_IACL)) {
+        VLOG_DBG("iACL container destruct placeholder");
+        return;
+    }
+
     hmap_remove(&all_ofproto_sai, &ofproto->all_ofproto_sai_node);
 }
 
 static void
 __sai_dealloc(struct ofproto *ofproto_)
 {
-    struct ofproto_sai *ofproto = __ofproto_sai_cast(ofproto_);
+    struct ofproto_sai *ofproto = ofproto_sai_cast(ofproto_);
 
     SAI_API_TRACE_FN();
 
@@ -540,7 +593,7 @@ __port_query_by_name(const struct ofproto *ofproto_, const char *devname,
 {
     SAI_API_TRACE_FN();
 
-    struct ofproto_sai *ofproto = __ofproto_sai_cast(ofproto_);
+    struct ofproto_sai *ofproto = ofproto_sai_cast(ofproto_);
     const char *type = netdev_get_type_from_name(devname);
 
     if (type) {
@@ -567,7 +620,7 @@ __get_ofp_port(const struct ofproto_sai *ofproto, ofp_port_t ofp_port)
 static int
 __port_add(struct ofproto *ofproto_, struct netdev *netdev)
 {
-    struct ofproto_sai *ofproto = __ofproto_sai_cast(ofproto_);
+    struct ofproto_sai *ofproto = ofproto_sai_cast(ofproto_);
 
     SAI_API_TRACE_FN();
 
@@ -578,13 +631,18 @@ __port_add(struct ofproto *ofproto_, struct netdev *netdev)
 static int
 __port_del(struct ofproto *ofproto_, ofp_port_t ofp_port)
 {
-    struct ofproto_sai *ofproto = __ofproto_sai_cast(ofproto_);
+    struct ofproto_sai *ofproto = ofproto_sai_cast(ofproto_);
     struct ofport_sai *ofport = __get_ofp_port(ofproto, ofp_port);
 
     SAI_API_TRACE_FN();
 
-    sset_find_and_delete(&ofproto->ports,
-                        netdev_get_name(ofport->up.netdev));
+    if (ofport) {
+        sset_find_and_delete(&ofproto->ports,
+                            netdev_get_name(ofport->up.netdev));
+    } else {
+        VLOG_WARN("Port could not be found (ofproto: %s, ofp_port: %u)",
+                  ofproto_->name, ofp_port);
+    }
     return 0;
 }
 
@@ -611,7 +669,7 @@ static int
 __port_dump_next(const struct ofproto *ofproto_, void *state_,
                  struct ofproto_port *port)
 {
-    struct ofproto_sai *ofproto = __ofproto_sai_cast(ofproto_);
+    struct ofproto_sai *ofproto = ofproto_sai_cast(ofproto_);
     struct port_dump_state *state = state_;
     struct sset_node *node;
 
@@ -665,7 +723,7 @@ __rule_alloc(void)
 {
     struct rule *rule = xzalloc(sizeof *rule);
 
-    SAI_API_TRACE_NOT_IMPLEMENTED_FN();
+    SAI_API_TRACE_FN();
 
     return rule;
 }
@@ -1182,6 +1240,8 @@ static int __ofbundle_router_intf_remove(struct ofbundle_sai *bundle)
     struct ofproto_sai *ofproto = NULL;
     struct ofport_sai *port = NULL;
     struct ofport_sai *next_port = NULL;
+    struct neigbor_entry *neigh = NULL;
+    struct neigbor_entry *next_neigh = NULL;
 
     ovs_assert(bundle != NULL);
     ovs_assert(bundle->ofproto != NULL);
@@ -1196,6 +1256,21 @@ static int __ofbundle_router_intf_remove(struct ofbundle_sai *bundle)
         hmap_remove(&bundle->local_routes, &addr->addr_node);
         free(addr->address);
         free(addr);
+    }
+
+    HMAP_FOR_EACH_SAFE(neigh, next_neigh, neigh_node, &bundle->neighbors) {
+        if (0 != strnlen(neigh->mac_address, MAC_STR_LEN)) {
+            status = ops_sai_neighbor_remove(addr_is_ipv6(neigh->ip_address),
+                                             neigh->ip_address,
+                                             &bundle->router_intf.rifid);
+            ERRNO_EXIT(status);
+
+            hmap_remove(&bundle->neighbors, &neigh->neigh_node);
+
+            free(neigh->ip_address);
+            free(neigh->mac_address);
+            free(neigh);
+        }
     }
 
     if (bundle->router_intf.created) {
@@ -1488,7 +1563,7 @@ static int __ofproto_ip_add(struct ofproto *ofproto_,
                             const char *ip,
                             bool is_ipv6)
 {
-    struct ofproto_sai *ofproto = __ofproto_sai_cast(ofproto_);
+    struct ofproto_sai *ofproto = ofproto_sai_cast(ofproto_);
     char *ptr = NULL;
     /* IP address length + strlen(/128) */
     char prefix[INET6_ADDRSTRLEN + 5] = { };
@@ -1518,7 +1593,7 @@ static int __ofproto_ip_remove(struct ofproto *ofproto_,
                                  const char *ip,
                                  bool is_ipv6)
 {
-    struct ofproto_sai *ofproto = __ofproto_sai_cast(ofproto_);
+    struct ofproto_sai *ofproto = ofproto_sai_cast(ofproto_);
     char *ptr = NULL;
     char prefix[INET6_ADDRSTRLEN + 5]; /* IP address length + strlen(/128) */
 
@@ -1579,6 +1654,8 @@ __ofbundle_create(struct ofproto_sai *ofproto, void *aux,
     hmap_init(&bundle->local_routes);
     hmap_init(&bundle->neighbors);
 
+    __bundle_cache_init(bundle);
+
     return bundle;
 }
 
@@ -1586,7 +1663,7 @@ __ofbundle_create(struct ofproto_sai *ofproto, void *aux,
  * Destroy bundle and remove ports from it.
  */
 static void
-__ofbundle_destroy(struct ofbundle_sai *bundle)
+__ofbundle_destroy(struct ofbundle_sai *bundle, bool delete_config_only)
 {
     int status = 0;
     struct ofport_sai *port = NULL, *next_port = NULL;
@@ -1595,32 +1672,38 @@ __ofbundle_destroy(struct ofbundle_sai *bundle)
         return;
     }
 
-    status = __ofbundle_ip_remove(bundle);
-    ERRNO_LOG(status,
-              "Failed to remove bundle IP addresses (bundle: %s)",
-               bundle->name);
-
-    status = __ofbundle_router_intf_remove(bundle);
-    ERRNO_LOG(status,
-              "Failed to remove router interface configuration (bundle: %s)",
-              bundle->name);
-
-    LIST_FOR_EACH_SAFE(port, next_port, bundle_node, &bundle->ports) {
-        status = __ofbundle_port_del(port);
+    if (!bundle->config_cache.cache_config) {
+        status = __ofbundle_ip_remove(bundle);
         ERRNO_LOG(status,
-                  "Failed to remove bundle port configuration (bundle: %s)",
+                  "Failed to remove bundle IP addresses (bundle: %s)",
+                   bundle->name);
+
+        status = __ofbundle_router_intf_remove(bundle);
+        ERRNO_LOG(status,
+                  "Failed to remove router interface configuration (bundle: %s)",
                   bundle->name);
+
+        LIST_FOR_EACH_SAFE(port, next_port, bundle_node, &bundle->ports) {
+            status = __ofbundle_port_del(port);
+            ERRNO_LOG(status,
+                      "Failed to remove bundle port configuration (bundle: %s)",
+                      bundle->name);
+        }
     }
 
-    __ofbundle_rename(bundle, NULL);
-    __trunks_realloc(bundle, NULL);
-    hmap_destroy(&bundle->ipv4_secondary);
-    hmap_destroy(&bundle->ipv6_secondary);
-    hmap_destroy(&bundle->local_routes);
-    hmap_destroy(&bundle->neighbors);
-    hmap_remove(&bundle->ofproto->bundles, &bundle->hmap_node);
+    if (!delete_config_only) {
+        __ofbundle_rename(bundle, NULL);
+        __trunks_realloc(bundle, NULL);
+        hmap_destroy(&bundle->ipv4_secondary);
+        hmap_destroy(&bundle->ipv6_secondary);
+        hmap_destroy(&bundle->local_routes);
+        hmap_destroy(&bundle->neighbors);
+        hmap_remove(&bundle->ofproto->bundles, &bundle->hmap_node);
 
-    free(bundle);
+        __bundle_cache_free(bundle);
+
+        free(bundle);
+    }
 }
 
 /*
@@ -1670,13 +1753,18 @@ __ofbundle_lookup_by_netdev_name(struct ofproto_sai *ofproto,
  */
 static int
 __bundle_set(struct ofproto *ofproto_, void *aux,
-                       const struct ofproto_bundle_settings *s)
+             const struct ofproto_bundle_settings *s)
 {
     struct ofbundle_sai *bundle = NULL;
     int status = 0;
-    struct ofproto_sai *ofproto = __ofproto_sai_cast(ofproto_);
+    struct ofproto_sai *ofproto = ofproto_sai_cast(ofproto_);
 
     SAI_API_TRACE_FN();
+
+    if (STR_EQ(ofproto_->type, SAI_TYPE_IACL)) {
+        VLOG_DBG("iACL container bundle set placeholder (%s bundle)",s == NULL ? "destroy":"create");
+        goto exit;
+    }
 
     if ((s && STR_EQ(s->name, DEFAULT_BRIDGE_NAME))) {
         goto exit;
@@ -1684,28 +1772,47 @@ __bundle_set(struct ofproto *ofproto_, void *aux,
 
     bundle = __ofbundle_lookup(ofproto, aux);
     if (NULL == s) {
-        __ofbundle_destroy(bundle);
+        __ofbundle_destroy(bundle, false);
         goto exit;
     }
 
     if (NULL == bundle) {
         bundle = __ofbundle_create(ofproto, aux, s);
+        if (!__is_bundle_active(ofproto_, NULL, s)) {
+            bundle->config_cache.cache_config = true;
+        }
     }
-
-    status = __ofbundle_ports_reconfigure(bundle, s);
-    ERRNO_LOG_EXIT(status, "Failed to set bundle");
 
     if (s->n_slaves > 1) {
         status = -1;
         ERRNO_LOG_EXIT(status, "LAGs are not implemented");
     }
 
+    if (bundle->config_cache.cache_config) {
+        status = 0;
+        goto exit;
+    }
+
+    status = __ofbundle_ports_reconfigure(bundle, s);
+    ERRNO_LOG_EXIT(status, "Failed to reconfigure ports (bundle_name: %s)",
+                   s->name);
+
     if (STR_EQ(ofproto_->type, SAI_INTERFACE_TYPE_VRF)) {
-        __ofbundle_router_intf_reconfigure(bundle, s);
-	    __ofbundle_ip_reconfigure(bundle, s);
+        status = __ofbundle_router_intf_reconfigure(bundle, s);
+        ERRNO_LOG_EXIT(status, "Failed to reconfigure router interfaces "
+                       "(bundle_name: %s)",
+                       s->name);
+        status = __ofbundle_ip_reconfigure(bundle, s);
+        ERRNO_LOG_EXIT(status, "Failed to reconfigure ip addresses "
+                       "(bundle_name: %s)",
+                       s->name);
     }
 
 exit:
+    if (bundle && s) {
+        __bundle_setting_free(bundle);
+        __bundle_setting_copy(bundle, s);
+    }
     return status;
 }
 
@@ -1727,7 +1834,7 @@ __bundle_remove(struct ofport *port_)
 
 exit:
     if (list_is_empty(&bundle->ports)) {
-        __ofbundle_destroy(bundle);
+        __ofbundle_destroy(bundle, false);
     }
 }
 
@@ -1737,6 +1844,225 @@ __bundle_get(struct ofproto *ofproto_, void *aux, int *bundle_handle)
     SAI_API_TRACE_FN();
 
     return 0;
+}
+
+/**
+ * Verify if bundle HW lane is active.
+ *
+ * @param[in] bundle bundle.
+ * @param[in] s bundle configuration.
+ *
+ * @return true if bundle is active else false.
+ */
+static bool
+__is_bundle_active(struct ofproto *ofproto_,
+                   const struct ofbundle_sai *bundle,
+                   const struct ofproto_bundle_settings *s)
+{
+    bool lane_state = false;
+    struct ofport_sai *port = NULL, *next_port = NULL;
+    struct ofproto_sai *ofproto = ofproto_sai_cast(ofproto_);
+
+    if (bundle) {
+        if (list_is_empty(&bundle->ports)) {
+            return false;
+        }
+
+        LIST_FOR_EACH_SAFE(port, next_port, bundle_node, &bundle->ports) {
+            if (netdev_sai_get_lane_state(port->up.netdev, &lane_state) ||
+                    !lane_state) {
+                return false;
+            }
+
+        }
+
+        return lane_state;
+    } else if (s) {
+        port = __get_ofp_port(ofproto, *s->slaves);
+
+        if (!port) {
+            return false;
+        }
+
+        if (netdev_sai_get_lane_state(port->up.netdev, &lane_state)) {
+            return false;
+        }
+
+        return lane_state;
+    }
+
+    return false;
+}
+
+/**
+ * Make a deep copy of bundle settings.
+ *
+ * @param[in] bundle bundle into which configuration to be copied.
+ * @param[in] s configuration that should be copied.
+ *
+ * @return 0, sai status converted to errno otherwise.
+ */
+static void
+__bundle_setting_copy(struct ofbundle_sai *bundle,
+                      const struct ofproto_bundle_settings *s)
+{
+    int i = 0;
+    struct ofproto_bundle_settings *copy = NULL;
+
+    NULL_PARAM_LOG_ABORT(bundle);
+    NULL_PARAM_LOG_ABORT(s);
+    ovs_assert(!bundle->config_cache.config);
+
+    copy = xzalloc(sizeof(*s));
+
+    copy->name = xstrdup(s->name);
+
+    if (s->slaves) {
+        copy->slaves = xzalloc(sizeof(*s->slaves) * s->n_slaves);
+        memcpy(copy->slaves, s->slaves, sizeof(*s->slaves) * s->n_slaves);
+    }
+    copy->n_slaves = s->n_slaves;
+
+    copy->vlan_mode = s->vlan_mode;
+    copy->vlan = s->vlan;
+    copy->trunks = vlan_bitmap_clone(s->trunks);
+    copy->use_priority_tags = s->use_priority_tags;
+
+    if (s->bond) {
+        copy->bond = xzalloc(sizeof(*s->bond));
+        memcpy(copy->bond, s->bond, sizeof(*s->bond));
+    }
+
+    if (s->lacp) {
+        copy->lacp = xzalloc(sizeof(*s->lacp));
+        memcpy(copy->lacp, s->lacp, sizeof(*s->lacp));
+    }
+
+    if (s->lacp_slaves) {
+        copy->lacp_slaves = xzalloc(sizeof(*s->lacp_slaves) * s->n_slaves);
+        memcpy(copy->lacp_slaves, s->lacp_slaves,
+               sizeof(*s->lacp_slaves) * s->n_slaves);
+    }
+
+    copy->realdev_ofp_port = s->realdev_ofp_port;
+
+    for (i = 0; i < PORT_OPT_MAX; ++i) {
+        /* It is safe to copy pointers they will be actual
+         * during bundle whole life circle */
+        copy->port_options[i] = s->port_options[i];
+    }
+
+    copy->hw_bond_should_exist = s->hw_bond_should_exist;
+
+    copy->bond_handle_alloc_only = s->bond_handle_alloc_only;
+
+    if (s->slaves_tx_enable) {
+        copy->slaves_tx_enable = xzalloc(sizeof(*s->slaves_tx_enable) * s->n_slaves_tx_enable);
+        memcpy(copy->slaves_tx_enable,
+               s->slaves_tx_enable,
+               sizeof(*s->slaves_tx_enable) * s->n_slaves_tx_enable);
+    }
+    copy->n_slaves_tx_enable = s->n_slaves_tx_enable;
+
+    copy->slaves_entered = s->slaves_entered;
+    copy->ip_change = s->ip_change;
+
+    if (s->ip4_address) {
+        copy->ip4_address = xstrdup(s->ip4_address);
+    }
+
+    if (s->ip6_address) {
+        copy->ip6_address = xstrdup(s->ip6_address);
+    }
+
+    if (s->n_ip4_address_secondary) {
+        copy->ip4_address_secondary =xzalloc(sizeof(*s->ip4_address_secondary) * s->n_ip4_address_secondary);
+        for (i = 0; i < s->n_ip4_address_secondary; ++i) {
+            copy->ip4_address_secondary[i] = xstrdup(s->ip4_address_secondary[i]);
+        }
+    }
+    copy->n_ip4_address_secondary = s->n_ip4_address_secondary;
+
+    if (s->n_ip6_address_secondary) {
+        copy->ip6_address_secondary = xzalloc(sizeof(*s->ip6_address_secondary) * s->n_ip6_address_secondary);
+        for (i = 0; i < s->n_ip6_address_secondary; ++i) {
+            copy->ip6_address_secondary[i] = xstrdup(s->ip6_address_secondary[i]);
+        }
+    }
+    copy->n_ip6_address_secondary = s->n_ip6_address_secondary;
+
+    copy->enable = s->enable;
+
+    bundle->config_cache.config = copy;
+}
+
+/**
+ * Free cached bundle settings resources.
+ *
+ * @param[in] bundle bundle which stores settings resources
+ *
+ * @return 0, sai status converted to errno otherwise.
+ */
+static void
+__bundle_setting_free(struct ofbundle_sai *bundle)
+{
+    int i = 0;
+    struct ofproto_bundle_settings *s = NULL;
+
+    if (!bundle || ! bundle->config_cache.config) {
+        return;
+    }
+
+    s = bundle->config_cache.config;
+
+    free(s->name);
+    free(s->slaves);
+    bitmap_free(s->trunks);
+    free(s->bond);
+    free(s->lacp);
+    free(s->lacp_slaves);
+
+    free(s->slaves_tx_enable);
+    free(s->ip4_address);
+    free(s->ip6_address);
+
+    if (s->n_ip4_address_secondary) {
+        for (i = 0; i < s->n_ip4_address_secondary; ++i) {
+            free(s->ip4_address_secondary[i]);
+        }
+    }
+
+    if (s->n_ip6_address_secondary) {
+        for (i = 0; i < s->n_ip6_address_secondary; ++i) {
+            free(s->ip6_address_secondary[i]);
+        }
+    }
+
+    free(s);
+    bundle->config_cache.config = NULL;
+}
+
+static void __bundle_cache_init(struct ofbundle_sai *bundle)
+{
+    hmap_init(&bundle->config_cache.local_routes);
+}
+
+static void __bundle_cache_free(struct ofbundle_sai *bundle)
+{
+    struct ip_address *addr = NULL;
+    struct ip_address *next = NULL;
+
+    ovs_assert(bundle);
+
+    __bundle_setting_free(bundle);
+
+    HMAP_FOR_EACH_SAFE (addr, next, addr_node, &bundle->local_routes) {
+        hmap_remove(&bundle->local_routes, &addr->addr_node);
+        free(addr->address);
+        free(addr);
+    }
+
+    hmap_destroy(&bundle->config_cache.local_routes);
 }
 
 static int
@@ -1878,16 +2204,22 @@ __add_l3_host_entry(const struct ofproto *ofproto_, void *aux,
                     char *next_hop_mac_addr, int *l3_egress_id)
 {
     int status = 0;
-    struct ofproto_sai *ofproto = __ofproto_sai_cast(ofproto_);
+    struct ofproto_sai *ofproto = ofproto_sai_cast(ofproto_);
     struct ofbundle_sai *bundle = __ofbundle_lookup(ofproto, aux);
     struct neigbor_entry *neigh = NULL;
 
     SAI_API_TRACE_FN();
 
     ovs_assert(bundle);
-    ovs_assert(bundle->router_intf.created);
     ovs_assert(ip_addr);
     ovs_assert(next_hop_mac_addr);
+
+    if (bundle->config_cache.cache_config) {
+        status = 0;
+        goto exit;
+    }
+
+    ovs_assert(bundle->router_intf.created);
 
     neigh = __neigh_entry_hash_find(ip_addr, bundle);
 
@@ -1927,15 +2259,21 @@ __delete_l3_host_entry(const struct ofproto *ofproto_, void *aux,
                        int *l3_egress_id)
 {
     int status = 0;
-    struct ofproto_sai *ofproto = __ofproto_sai_cast(ofproto_);
+    struct ofproto_sai *ofproto = ofproto_sai_cast(ofproto_);
     struct ofbundle_sai *bundle = __ofbundle_lookup(ofproto, aux);
     struct neigbor_entry *neigh = NULL;
 
     SAI_API_TRACE_FN();
 
     ovs_assert(bundle);
-    ovs_assert(bundle->router_intf.created);
     ovs_assert(ip_addr);
+
+    if (bundle->config_cache.cache_config) {
+        status = 0;
+        goto exit;
+    }
+
+    ovs_assert(bundle->router_intf.created);
 
     neigh = __neigh_entry_hash_find(ip_addr, bundle);
 
@@ -1947,13 +2285,9 @@ __delete_l3_host_entry(const struct ofproto *ofproto_, void *aux,
             ERRNO_EXIT(status);
         }
         __neigh_entry_hash_remove(ip_addr, bundle);
-    } else {
-        VLOG_WARN("Not removing non-existing neighbor entry"
-                  "(ip address: %s, rifid: %lu)",
-                  ip_addr, bundle->router_intf.rifid.data);
     }
 
-    exit:
+exit:
     SAI_API_TRACE_EXIT_FN();
     return status;
 }
@@ -1964,7 +2298,7 @@ __get_l3_host_hit_bit(const struct ofproto *ofproto_, void *aux,
                                 bool *hit_bit)
 {
     int status = 0;
-    struct ofproto_sai *ofproto = __ofproto_sai_cast(ofproto_);
+    struct ofproto_sai *ofproto = ofproto_sai_cast(ofproto_);
     struct ofbundle_sai *bundle = __ofbundle_lookup(ofproto, aux);
     struct neigbor_entry *neigh = NULL;
 
@@ -2007,7 +2341,7 @@ __l3_route_action(const struct ofproto *ofprotop,
 {
     int          status     = 0;
     uint32_t     rnh_count  = 0;
-    struct ofproto_sai *sai_ofproto = __ofproto_sai_cast(ofprotop);
+    struct ofproto_sai *sai_ofproto = ofproto_sai_cast(ofprotop);
     char *next_hops[routep->n_nexthops];
     uint32_t lnh_count = 0;
     char *egress_intf[routep->n_nexthops];
@@ -2072,14 +2406,13 @@ __l3_route_action(const struct ofproto *ofprotop,
             ovs_assert(bundle);
             ovs_assert(bundle->router_intf.created);
 
-            status = ops_sai_route_local_add(&sai_ofproto->vrid,
-                                             routep->prefix,
-                                             &bundle->router_intf.rifid);
+            if (!bundle->config_cache.cache_config) {
+                status = ops_sai_route_local_add(&sai_ofproto->vrid,
+                                                 routep->prefix,
+                                                 &bundle->router_intf.rifid);
+            }
 
-            addr = xzalloc(sizeof *addr);
-            addr->address = xstrdup(routep->prefix);
-            hmap_insert(&bundle->local_routes, &addr->addr_node,
-                        hash_string(addr->address, 0));
+            __l3_local_route_attach_to_bundle(bundle, routep->prefix);
 
             break;
         case OFPROTO_ROUTE_DELETE:
@@ -2089,20 +2422,20 @@ __l3_route_action(const struct ofproto *ofprotop,
                 break;
             }
 
-            HMAP_FOR_EACH_WITH_HASH (addr, addr_node,
-                    hash_string(routep->prefix, 0),
-                    &bundle->local_routes) {
-                if (STR_EQ(addr->address, routep->prefix)) {
-                    status = ops_sai_route_remove(&sai_ofproto->vrid,
-                                                  routep->prefix);
-                    ERRNO_EXIT(status);
-
-                    hmap_remove(&bundle->local_routes, &addr->addr_node);
-                    free(addr->address);
-                    free(addr);
-                    break;
+            if (!bundle->config_cache.cache_config) {
+                HMAP_FOR_EACH_WITH_HASH (addr, addr_node,
+                        hash_string(routep->prefix, 0),
+                        &bundle->local_routes) {
+                    if (STR_EQ(addr->address, routep->prefix)) {
+                        status = ops_sai_route_remove(&sai_ofproto->vrid,
+                                                      routep->prefix);
+                        ERRNO_EXIT(status);
+                        break;
+                    }
                 }
             }
+
+            __l3_local_route_dettach_from_bundle(bundle, routep->prefix);
 
             break;
         default:
@@ -2114,6 +2447,56 @@ __l3_route_action(const struct ofproto *ofprotop,
 exit:
     SAI_API_TRACE_EXIT_FN();
     return status;
+}
+
+static void
+__l3_local_route_attach_to_bundle(struct ofbundle_sai *bundle, char *prefix)
+{
+    struct ip_address *addr = NULL;
+
+    if (!bundle->config_cache.cache_config) {
+        /* Add local route to bundle */
+        addr = xzalloc(sizeof *addr);
+        addr->address = xstrdup(prefix);
+        hmap_insert(&bundle->local_routes, &addr->addr_node,
+                    hash_string(addr->address, 0));
+    }
+
+    /* Add local route to bundle config cache */
+    addr = xzalloc(sizeof *addr);
+    addr->address = xstrdup(prefix);
+    hmap_insert(&bundle->config_cache.local_routes, &addr->addr_node,
+                    hash_string(addr->address, 0));
+}
+
+static void
+__l3_local_route_dettach_from_bundle(struct ofbundle_sai *bundle, char * prefix)
+{
+    struct ip_address *addr = NULL;
+
+    if (!bundle->config_cache.cache_config) {
+        HMAP_FOR_EACH_WITH_HASH (addr, addr_node,
+                                 hash_string(prefix, 0),
+                                 &bundle->local_routes) {
+            if (STR_EQ(addr->address, prefix)) {
+                hmap_remove(&bundle->local_routes, &addr->addr_node);
+                free(addr->address);
+                free(addr);
+                break;
+            }
+        }
+    }
+
+    HMAP_FOR_EACH_WITH_HASH (addr, addr_node,
+                             hash_string(prefix, 0),
+                             &bundle->config_cache.local_routes) {
+        if (STR_EQ(addr->address, prefix)) {
+            hmap_remove(&bundle->config_cache.local_routes, &addr->addr_node);
+            free(addr->address);
+            free(addr);
+            break;
+        }
+    }
 }
 
 static int

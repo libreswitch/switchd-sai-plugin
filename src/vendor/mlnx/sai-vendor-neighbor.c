@@ -4,13 +4,12 @@
  * the COPYING file.
  */
 
-#include <mlnx_sai.h>
-
 #include <packets.h>
 
 #include <sai-log.h>
 #include <sai-neighbor.h>
 
+/* should be included last due to defines conflicts */
 #include <sai-vendor-util.h>
 
 VLOG_DEFINE_THIS_MODULE(mlnx_sai_neighbor);

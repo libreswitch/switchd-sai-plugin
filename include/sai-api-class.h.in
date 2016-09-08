@@ -29,7 +29,9 @@ struct ops_sai_api_class {
 void ops_sai_api_init(void);
 int ops_sai_api_uninit(void);
 const struct ops_sai_api_class *ops_sai_api_get_instance(void);
-sai_object_id_t ops_sai_api_hw_id2port_id(uint32_t);
+sai_object_id_t ops_sai_api_port_map_get_oid(uint32_t);
+void ops_sai_api_port_map_delete(uint32_t);
+void ops_sai_api_port_map_add(uint32_t, sai_object_id_t);
 int ops_sai_api_base_mac_get(struct eth_addr *);
 
 #endif /* sai-api-class.h */

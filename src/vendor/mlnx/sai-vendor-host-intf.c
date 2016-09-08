@@ -1,3 +1,9 @@
+/*
+ * Copyright Mellanox Technologies, Ltd. 2001-2016.
+ * This software product is licensed under Apache version 2, as detailed in
+ * the COPYING file.
+ */
+
 #include <util.h>
 #include <hmap.h>
 #include <hash.h>
@@ -9,15 +15,13 @@
 #include <sai-host-intf.h>
 #include <sai-port.h>
 
+/* should be included last due to defines conflicts */
 #include <sai-vendor-util.h>
-
-#include <mlnx_sai.h>
 #include <sx/sdk/sx_net_lib.h>
 
 #define SAI_TRAP_GROUP_MAX_NAME_LEN 50
 #define SAI_TRAP_ID_MAX_COUNT 10
 
-#define MLNX_TRAP_GROUP_IP2ME "mlnx_trap_group_ip2me"
 #define MLNX_TRAP_GROUP_UNKNOWN_IP_DEST "mlnx_trap_group_unknown_ip_dest"
 
 #define COMMAND_MAX_SIZE 512
@@ -34,19 +38,6 @@ struct hif_entry {
 
 /* rate_max and burst_max are in 10^3 units. */
 static const struct ops_sai_trap_group_config mlnx_trap_group_config[] = { {
-        .name = MLNX_TRAP_GROUP_IP2ME,
-        .trap_ids = {
-            SX_TRAP_ID_IP2ME,
-            -1
-        },
-        .priority = 4,
-        .policer_config = {
-            .rate_max = 5,
-            .burst_max = 5,
-        },
-        .is_log = false,
-        .is_l3 = true,
-    }, {
         .name = MLNX_TRAP_GROUP_UNKNOWN_IP_DEST,
         .trap_ids = {
             SX_TRAP_ID_L3_UC_IP_BASE + SX_TRAP_PRIORITY_BEST_EFFORT,
@@ -458,7 +449,7 @@ __mlnx_create_l2_port_netdev(const char *name,
               name,
               handle->data);
 
-    sai_status = mlnx_object_to_type(ops_sai_api_hw_id2port_id(handle->data),
+    sai_status = mlnx_object_to_type(ops_sai_api_port_map_get_oid(handle->data),
                                      SAI_OBJECT_TYPE_PORT,
                                      &obj_data,
                                      NULL);
@@ -554,7 +545,7 @@ __mlnx_create_l3_port_netdev(const char *name,
               name,
               handle->data);
 
-    sai_status = mlnx_object_to_type(ops_sai_api_hw_id2port_id(handle->data),
+    sai_status = mlnx_object_to_type(ops_sai_api_port_map_get_oid(handle->data),
                                      SAI_OBJECT_TYPE_PORT,
                                      &obj_data,
                                      NULL);

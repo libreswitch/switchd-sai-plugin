@@ -6,6 +6,8 @@
 
 #include <vlan-bitmap.h>
 #include <ofproto/ofproto.h>
+#include <hmap.h>
+#include <hash.h>
 
 #include <sai-log.h>
 #include <sai-api-class.h>
@@ -14,9 +16,93 @@
 
 VLOG_DEFINE_THIS_MODULE(sai_vlan);
 
+#define VLAN_MEMBER_PACK(_hw_id, _vlan) \
+    ((((uint64_t) _hw_id) << 32) | (_vlan & 0xFFF))
+
+#define VLAN_MEMBER_GET_PORT(_member) \
+    ((uint32_t) (_member >> 32))
+
+#define VLAN_MEMBER_GET_VLAN(_member) \
+    ((sai_vlan_id_t) (_member & 0xFFF))
+
 static int __vlan_port_set(sai_vlan_id_t, uint32_t, sai_vlan_tagging_mode_t,
                            bool);
 static int __trunks_port_set(const unsigned long *, uint32_t, bool);
+
+static struct hmap all_vlan_members = HMAP_INITIALIZER(&all_vlan_members);
+
+struct vlan_member_entry {
+    struct hmap_node hmap_node;
+    uint64_t vlan_member;
+    sai_object_id_t oid;
+    sai_vlan_tagging_mode_t mode;
+};
+
+/*
+ * Find VLAN member entry in hash map.
+ *
+ * @param[in] vlan_member_hmap    - Hash map.
+ * @param[in] vlan_member         - Router interface handle used as map key.
+ *
+ * @return Pointer to VLAN member entry or NULL if entry not found.
+ */
+static struct vlan_member_entry*
+__vlan_member_entry_hmap_find(struct hmap *vlan_member_hmap,
+                              uint64_t vlan_member)
+{
+    struct vlan_member_entry* vlan_member_entry = NULL;
+
+    HMAP_FOR_EACH_WITH_HASH(vlan_member_entry, hmap_node,
+                            hash_uint64(vlan_member), vlan_member_hmap) {
+        if (vlan_member_entry->vlan_member == vlan_member) {
+            return vlan_member_entry;
+        }
+    }
+
+    return NULL;
+}
+
+/*
+ * Add VLAN member entry to hash map.
+ *
+ * @param[in] vlan_member_hmap        - Hash map.
+ * @param[in] vlan_member_entry       - VLAN member entry.
+ */
+static void
+__vlan_member_entry_hmap_add(struct hmap *vlan_member_hmap,
+                             const struct vlan_member_entry* vlan_member_entry)
+{
+    struct vlan_member_entry *vlan_member_entry_int = NULL;
+
+    ovs_assert(!__vlan_member_entry_hmap_find(vlan_member_hmap,
+                                              vlan_member_entry->vlan_member));
+
+    vlan_member_entry_int = xzalloc(sizeof(*vlan_member_entry_int));
+    memcpy(vlan_member_entry_int, vlan_member_entry,
+           sizeof(*vlan_member_entry_int));
+
+    hmap_insert(vlan_member_hmap, &vlan_member_entry_int->hmap_node,
+                hash_uint64(vlan_member_entry_int->vlan_member));
+}
+
+/*
+ * Delete VLAN member entry from hash map.
+ *
+ * @param[in] vlan_member_hmap   - Hash map.
+ * @param[in] vlan_member        - VLAN member used as map key.
+ */
+static void
+__vlan_member_entry_hmap_del(struct hmap *vlan_member_hmap,
+                             uint64_t vlan_member)
+{
+    struct vlan_member_entry* vlan_member_entry =
+            __vlan_member_entry_hmap_find(vlan_member_hmap,
+                                          vlan_member);
+    if (vlan_member_entry) {
+        hmap_remove(vlan_member_hmap, &vlan_member_entry->hmap_node);
+        free(vlan_member_entry);
+    }
+}
 
 /*
  * Initialize VLANs.
@@ -131,19 +217,71 @@ static int
 __vlan_port_set(sai_vlan_id_t vid, uint32_t hw_id,
                 sai_vlan_tagging_mode_t mode, bool add)
 {
-    sai_vlan_port_t vlan_port = { };
     sai_status_t status = SAI_STATUS_SUCCESS;
+    uint64_t vlan_member = 0;
+    sai_object_id_t vlan_member_oid = SAI_NULL_OBJECT_ID;
+    sai_attribute_t vlan_member_attribs[3] = { };
+    struct vlan_member_entry vlan_member_entry = { };
+    struct vlan_member_entry *vlan_member_entry_ptr = NULL;
     const struct ops_sai_api_class *sai_api = ops_sai_api_get_instance();
 
-    vlan_port.port_id = ops_sai_api_hw_id2port_id(hw_id);
-    vlan_port.tagging_mode = mode;
+    vlan_member = VLAN_MEMBER_PACK(hw_id, vid);
+
     if (add) {
-        status = sai_api->vlan_api->add_ports_to_vlan(vid, 1, &vlan_port);
+        VLOG_INFO("Adding port to VLAN (port: %u, vlan: %u, mode: %d)",
+                  hw_id, vid, mode);
+
+        vlan_member_attribs[0].id = SAI_VLAN_MEMBER_ATTR_VLAN_ID;
+        vlan_member_attribs[0].value.u16 = vid;
+        vlan_member_attribs[1].id = SAI_VLAN_MEMBER_ATTR_PORT_ID;
+        vlan_member_attribs[1].value.oid = ops_sai_api_port_map_get_oid(hw_id);
+        vlan_member_attribs[2].id = SAI_VLAN_MEMBER_ATTR_TAGGING_MODE;
+        vlan_member_attribs[2].value.s32 = mode;
+
+        /* VLAN member entry mode was changed */
+        vlan_member_entry_ptr = __vlan_member_entry_hmap_find(&all_vlan_members,
+                                                              vlan_member);
+        if (vlan_member_entry_ptr && vlan_member_entry_ptr->mode != mode) {
+            if (__vlan_port_set(vid, hw_id, vlan_member_entry_ptr->mode,
+                                false)) {
+                status = SAI_STATUS_FAILURE;
+                SAI_ERROR_EXIT(status);
+            }
+        }
+
+        status = sai_api->vlan_api->create_vlan_member(&vlan_member_oid,
+                                                       ARRAY_SIZE(vlan_member_attribs),
+                                                       vlan_member_attribs);
+        SAI_ERROR_LOG_EXIT(status,
+                           "Failed to add port to VLAN (port: %u, vlan: %u)",
+                           hw_id, vid);
+
+        vlan_member_entry.vlan_member = vlan_member;
+        vlan_member_entry.oid = vlan_member_oid;
+        vlan_member_entry.mode = mode;
+
+        __vlan_member_entry_hmap_add(&all_vlan_members, &vlan_member_entry);
     } else {
-        status = sai_api->vlan_api->remove_ports_from_vlan(vid, 1, &vlan_port);
+        VLOG_INFO("Removing port from VLAN (port: %u, vlan: %u, mode: %d)",
+                  hw_id, vid, mode);
+
+        vlan_member_entry_ptr = __vlan_member_entry_hmap_find(&all_vlan_members,
+                                                              vlan_member);
+        if (!vlan_member_entry_ptr) {
+            status = SAI_STATUS_SUCCESS;
+            goto exit;
+        }
+
+        status = sai_api->vlan_api->remove_vlan_member(vlan_member_entry_ptr->oid);
+        if (status != SAI_STATUS_ITEM_NOT_FOUND) {
+            SAI_ERROR_LOG_EXIT(status,
+                               "Failed to remove port from VLAN "
+                               "(port: %u, vlan: %u)",
+                               hw_id, vid);
+        }
+
+        __vlan_member_entry_hmap_del(&all_vlan_members, vlan_member);
     }
-    SAI_ERROR_LOG_EXIT(status, "Failed to %s vlan %d on port %u",
-                       add ? "add" : "remove", vid, hw_id);
 
     if (add && (SAI_VLAN_PORT_UNTAGGED != mode)) {
         goto exit;

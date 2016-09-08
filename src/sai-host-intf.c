@@ -24,6 +24,7 @@
 #define SAI_TRAP_GROUP_DHCPV6 "sai_trap_group_dhcpv6"
 #define SAI_TRAP_GROUP_LACP "sai_trap_group_lacp"
 #define SAI_TRAP_GROUP_LLDP "sai_trap_group_lldp"
+#define SAI_TRAP_GROUP_IP2ME "sai_trap_group_ip2me"
 #define SAI_TRAP_GROUP_OSFP "sai_trap_group_osfp"
 #define SAI_TRAP_GROUP_S_FLOW "sai_trap_group_s_flow"
 #define SAI_TRAP_GROUP_STP "sai_trap_group_stp"
@@ -98,6 +99,19 @@ static const struct ops_sai_trap_group_config trap_group_config_table[] = { {
         .is_log = false,
         .is_l3 = false,
     }, {
+        .name = SAI_TRAP_GROUP_IP2ME,
+        .trap_ids = {
+            SAI_HOSTIF_TRAP_ID_IP2ME,
+            -1
+        },
+        .priority = 4,
+        .policer_config = {
+            .rate_max = 5000,
+            .burst_max = 5000,
+        },
+        .is_log = false,
+        .is_l3 = true,
+        }, {
         .name = SAI_TRAP_GROUP_OSFP,
         .trap_ids = {
             SAI_HOSTIF_TRAP_ID_OSPF,
@@ -255,7 +269,7 @@ __host_intf_traps_register(void)
         SAI_ERROR_LOG_ABORT(status, "Failed to register traps");
 
         /* create group */
-        attr[0].id = SAI_HOSTIF_TRAP_GROUP_ATTR_PRIO;
+        attr[0].id = SAI_HOSTIF_TRAP_GROUP_ATTR_QUEUE;
         attr[0].value.u32 = trap_group_config_table[i].priority;
         attr[1].id = SAI_HOSTIF_TRAP_GROUP_ATTR_POLICER;
         attr[1].value.oid = (sai_object_id_t)group_entry->policer.data;

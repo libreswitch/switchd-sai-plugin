@@ -7,6 +7,7 @@
 #include <sai-netdev.h>
 #include <sai-ofproto-provider.h>
 #include <sai-log.h>
+#include <sai-classifier.h>
 
 #define init libovs_sai_plugin_LTX_init
 #define run libovs_sai_plugin_LTX_run
@@ -22,6 +23,9 @@ void
 init(void)
 {
     SAI_API_TRACE_FN();
+
+    /* Extension plugins registration */
+    register_classifier_sai_plugin();
 }
 
 void

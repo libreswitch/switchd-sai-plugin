@@ -11,6 +11,7 @@
 #include <sai-hash.h>
 #include <sai-api-class.h>
 
+/* should be included last due to defines conflicts */
 #include <sai-vendor-util.h>
 
 #define HASH_LIST_SIZE (4)

@@ -4,12 +4,11 @@
  * the COPYING file.
  */
 
-#include <mlnx_sai.h>
-
 #include <sai-common.h>
 #include <sai-log.h>
 #include <sai-route.h>
 
+/* should be included last due to defines conflicts */
 #include <sai-vendor-util.h>
 
 VLOG_DEFINE_THIS_MODULE(mlnx_sai_route);
