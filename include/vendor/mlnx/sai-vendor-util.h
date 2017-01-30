@@ -10,16 +10,6 @@
 #include <mlnx_sai.h>
 #include <openvswitch/vlog.h>
 
-enum mlnx_platform_type {
-    MLNX_PLATFORM_TYPE_UNKNOWN = 0,
-    MLNX_PLATFORM_TYPE_SN2100,
-    MLNX_PLATFORM_TYPE_SN2700,
-    MLNX_PLATFORM_TYPE_SN2410,
-    __MLNX_PLATFORM_TYPE_MAX,
-    MLNX_PLATFORM_TYPE_MIN = MLNX_PLATFORM_TYPE_UNKNOWN,
-    MLNX_PLATFORM_TYPE_MAX = __MLNX_PLATFORM_TYPE_MAX - 1
-};
-
 /*
  * Logging macros
  */
@@ -56,6 +46,5 @@ do { \
 int ops_sai_common_ip_prefix_to_sx_ip_prefix(const char *prefix,
                                              sx_ip_prefix_t *sx_prefix);
 int ops_sai_common_ip_to_sx_ip(const char *ip, sx_ip_addr_t *sx_ip);
-int ops_sai_mlnx_platform_type_get(enum mlnx_platform_type *type);
 
 #endif /* sai-vendor-util.h */

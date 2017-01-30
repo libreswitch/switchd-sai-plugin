@@ -4,20 +4,18 @@
  * the COPYING file.
  */
 
+#include <mlnx_sai.h>
+#include <sai-vendor-util.h>
 #include <sai-log.h>
 
 #include <packets.h>
 #include <socket-util.h>
 #include <netinet/in.h>
 #include <limits.h>
-#include <sai-common.h>
 
 #include <util.h>
 #include <config-yaml.h>
 #include <i2c.h>
-
-/* should be included last due to defines conflicts */
-#include <sai-vendor-util.h>
 
 #define HW_DESC_DIR "/etc/openswitch/hwdesc"
 #define BASE_SUBSYSTEM "base"
@@ -233,12 +231,25 @@ static sai_status_t
 __cfg_yaml_fru_read(uint8_t *fru, int hdr_len, const YamlDevice *fru_dev,
                     const YamlConfigHandle cfg_yaml_handle)
 {
+    i2c_op op = {};
+    i2c_op *cmds[2] = { };
     sai_status_t status = SAI_STATUS_SUCCESS;
 
     NULL_PARAM_LOG_ABORT(fru);
     NULL_PARAM_LOG_ABORT(fru_dev);
 
-    status = i2c_data_read(cfg_yaml_handle, fru_dev, BASE_SUBSYSTEM, 0, hdr_len, fru)
+    op.direction = READ;
+    op.device = fru_dev->name;
+    op.register_address = 0;
+    op.byte_count = hdr_len;
+    op.data = fru;
+    op.set_register = false;
+    op.negative_polarity = false;
+
+    cmds[0] = &op;
+    cmds[1] = (i2c_op *) NULL;
+
+    status = i2c_execute(cfg_yaml_handle, BASE_SUBSYSTEM, fru_dev, cmds)
              ? SAI_STATUS_FAILURE
              : SAI_STATUS_SUCCESS;
     SAI_ERROR_LOG_EXIT(status, "Failed to read FRU EEPROM");
@@ -285,45 +296,6 @@ exit:
 }
 
 /**
- * Read system ID.
- *
- * @param[out] sys_id_buf - system ID buffer.
- *
- * @return sai_status_t.
- */
-sai_status_t
-__read_system_id(char *sys_id_buf)
-{
-    uint32_t len = 0;
-    FILE *pipe = NULL;
-    sai_status_t status = SAI_STATUS_SUCCESS;
-
-    pipe = popen(GET_SYSTEM_ID_COMMAND, "r");
-    if (NULL == pipe) {
-        status = SAI_STATUS_FAILURE;
-        SAI_ERROR_LOG_EXIT(status,
-                           "Failed to read system ID as couldn't run '%s'",
-                            GET_SYSTEM_ID_COMMAND);
-    }
-
-    if (NULL == fgets(sys_id_buf, sizeof(sys_id_buf) , pipe)) {
-        status = SAI_STATUS_FAILURE;
-        SAI_ERROR_LOG_EXIT(status, "Failed to read system ID");
-    }
-
-    /* Replacing '\n' with '\0' */
-    len = strnlen(sys_id_buf, sizeof(sys_id_buf));
-    sys_id_buf[len - 1] = '\0';
-
-exit:
-    if (NULL != pipe) {
-        (void)pclose(pipe);
-    }
-
-    return status;
-}
-
-/**
  * Return config file path depending on system ID
  *
  * @param[out] - Char pointer to configuration path buffer.
@@ -336,47 +308,34 @@ ops_sai_vendor_config_path_get(char *config_path, uint32_t path_len)
 {
     sai_status_t status = SAI_STATUS_SUCCESS;
     char sys_id_buf[NAME_MAX]  = { };
+    uint32_t len = 0;
+    FILE *pipe = NULL;
 
     NULL_PARAM_LOG_ABORT(config_path);
     ovs_assert(path_len);
 
-    status = __read_system_id(sys_id_buf);
-    SAI_ERROR_EXIT(status);
+    pipe = popen(GET_SYSTEM_ID_COMMAND, "r");
+    if (NULL == pipe) {
+        status = SAI_STATUS_FAILURE;
+        SAI_ERROR_LOG_EXIT(status,
+                           "Failed to read system ID as couldn't run '%s'",
+                           GET_SYSTEM_ID_COMMAND);
+    }
+    if (NULL == fgets(sys_id_buf, sizeof(sys_id_buf) , pipe)) {
+        status = SAI_STATUS_FAILURE;
+        SAI_ERROR_LOG_EXIT(status, "Failed to read system ID");
+    }
+
+    /* Replacing '\n' with '\0' */
+    len = strnlen(sys_id_buf, sizeof(sys_id_buf));
+    sys_id_buf[len - 1] = '\0';
 
     snprintf(config_path, path_len, INIT_CONFIG_PATH_TEMPLATE, sys_id_buf);
     VLOG_INFO("Config file path is: %s", config_path);
 
 exit:
-
-    return status;
-}
-
-/**
- * Get Mellanox platform type.
- *
- * @param[out] type - platform type.
- *
- * @return sai_status_t.
- */
-int
-ops_sai_mlnx_platform_type_get(enum mlnx_platform_type *type)
-{
-    sai_status_t status = SAI_STATUS_SUCCESS;
-    char sys_id_buf[NAME_MAX]  = { };
-
-    status = __read_system_id(sys_id_buf);
-    SAI_ERROR_EXIT(status);
-
-    if (STR_EQ(sys_id_buf, "2100")) {
-        *type = MLNX_PLATFORM_TYPE_SN2100;
-    } else if (STR_EQ(sys_id_buf, "2410")) {
-        *type = MLNX_PLATFORM_TYPE_SN2410;
-    } else if (STR_EQ(sys_id_buf, "2700")) {
-        *type = MLNX_PLATFORM_TYPE_SN2700;
-    } else {
-        *type = MLNX_PLATFORM_TYPE_UNKNOWN;
+    if (NULL != pipe) {
+        (void)pclose(pipe);
     }
-
-exit:
-    return SAI_ERROR_2_ERRNO(status);
+    return status;
 }
