@@ -3,6 +3,9 @@
  * This software product is licensed under Apache version 2, as detailed in
  * the COPYING file.
  */
+
+#include <mlnx_sai.h>
+
 #include <hmap.h>
 #include <hash.h>
 #include <netdev.h>
@@ -12,7 +15,6 @@
 #include <sai-router-intf.h>
 #include <sai-port.h>
 
-/* should be included last due to defines conflicts */
 #include <sai-vendor-util.h>
 
 VLOG_DEFINE_THIS_MODULE(mlnx_sai_router_intf);
@@ -107,7 +109,7 @@ void __mlnx_port_transaction_to_l2(uint32_t hw_id)
     VLOG_INFO("Starting port transaction to L2 (port_id: %u)",
               hw_id);
 
-    sai_status = mlnx_object_to_type(ops_sai_api_port_map_get_oid(hw_id),
+    sai_status = mlnx_object_to_type(ops_sai_api_hw_id2port_id(hw_id),
                                      SAI_OBJECT_TYPE_PORT,
                                      &obj_data,
                                      NULL);
@@ -198,7 +200,7 @@ static int __router_intf_create(const handle_t *vr_handle,
               vr_handle->data, ops_sai_router_intf_type_to_str(type), handle->data);
 
     if (ROUTER_INTF_TYPE_PORT == type) {
-        sai_status = mlnx_object_to_type(ops_sai_api_port_map_get_oid(handle->data),
+        sai_status = mlnx_object_to_type(ops_sai_api_hw_id2port_id(handle->data),
                                          SAI_OBJECT_TYPE_PORT,
                                          &obj_data,
                                          NULL);

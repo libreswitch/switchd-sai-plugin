@@ -13,6 +13,5 @@
 #include <sai-vendor-router.h>
 #include <sai-vendor-neighbor.h>
 #include <sai-vendor-hash.h>
-#include <sai-vendor-port.h>
 
 #endif /* sai-vendor-common.h */

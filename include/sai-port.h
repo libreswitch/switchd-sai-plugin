@@ -28,12 +28,6 @@ struct ops_sai_port_config {
     bool pause_rx;
     int mtu;
     int speed;
-    int max_speed;
-};
-
-struct split_info {
-    bool disable_neighbor;
-    uint32_t neighbor_hw_id;
 };
 
 enum ops_sai_port_transaction {
@@ -44,15 +38,6 @@ enum ops_sai_port_transaction {
     OPS_SAI_PORT_TRANSACTION_MAX = __OPS_SAI_PORT_TRANSACTION_MAX - 1
 };
 
-enum ops_sai_port_split {
-    OPS_SAI_PORT_SPLIT_UNSPLIT,
-    OPS_SAI_PORT_SPLIT_TO_2,
-    OPS_SAI_PORT_SPLIT_TO_4,
-    __OPS_SAI_PORT_SPLIT_MAX,
-    OPS_SAI_PORT_SPLIT_MIN = OPS_SAI_PORT_SPLIT_UNSPLIT,
-    OPS_SAI_PORT_SPLIT_MAX = __OPS_SAI_PORT_SPLIT_MAX - 1
-};
-
 struct port_class {
     /*
      * Initialize port functionality.
@@ -61,7 +46,7 @@ struct port_class {
     /*
      * Reads port configuration.
      *
-     * @param[in] hw_id port HW lane id.
+     * @param[in] hw_id port label id.
      * @param[out] conf pointer to port configuration.
      *
      * @return 0, sai status converted to errno otherwise.
@@ -70,7 +55,7 @@ struct port_class {
     /*
      * Applies new port configuration.
      *
-     * @param[in] hw_id port HW lane id.
+     * @param[in] hw_id port label id.
      * @param[in] new pointer to new port configuration.
      * @param[out] old pointer to current port configuration, will be updated with
      * values from new configuration.
@@ -82,7 +67,7 @@ struct port_class {
     /*
      * Reads port mtu.
      *
-     * @param[in] hw_id port HW lane id.
+     * @param[in] hw_id port label id.
      * @param[out] mtu pointer to mtu variable, will be set to current value.
      *
      * @return 0, sai status converted to errno otherwise.
@@ -91,7 +76,7 @@ struct port_class {
     /*
      * Sets port mtu.
      *
-     * @param[in] hw_id port HW lane id.
+     * @param[in] hw_id port label id.
      * @param[in] mtu value to be applied.
      *
      * @return 0, sai status converted to errno otherwise.
@@ -100,7 +85,7 @@ struct port_class {
     /*
      * Reads port operational state.
      *
-     * @param[in] hw_id port HW lane id.
+     * @param[in] hw_id port label id.
      * @param[out] carrier pointer to boolean, set to true if port is in operational
      * state.
      *
@@ -110,7 +95,7 @@ struct port_class {
     /*
      * Updates netdevice flags.
      *
-     * @param[in] hw_id port HW lane id.
+     * @param[in] hw_id port label id.
      * @param[in] off flags to be cleared.
      * @param[in] on flags to be set.
      * @param[out] old_flagsp set with current flags.
@@ -124,7 +109,7 @@ struct port_class {
     /*
      * Reads port VLAN ID.
      *
-     * @param[in] hw_id port HW lane id.
+     * @param[in] hw_id port label id.
      * @param[out] pvid pointer to pvid variable, will be set to current pvid.
      *
      * @return 0, sai status converted to errno otherwise.
@@ -133,7 +118,7 @@ struct port_class {
     /*
      * Sets port VLAN ID.
      *
-     * @param[in] hw_id port HW lane id.
+     * @param[in] hw_id port label id.
      * @param[in] pvid new VLAN ID to be set.
      *
      * @return 0, sai status converted to errno otherwise.
@@ -142,36 +127,12 @@ struct port_class {
     /*
      * Get port statistics.
      *
-     * @param[in] hw_id port HW lane id.
+     * @param[in] hw_id port label id.
      * @param[out] stats pointer to netdev statistics.
      *
-     * @return 0, sai status converted to errno otherwise.
+     * @return SAI_STATUS_SUCCESS, sai specific error otherwise.
      */
     int (*stats_get)(uint32_t hw_id, struct netdev_stats *stats);
-    /*
-     * Get port split info.
-     *
-     * @param[in] hw_id port HW lane id.
-     * @param[in] mode split mode for which info requested.
-     * @param[out] info pointer to split info structure.
-     *
-     * @return 0, sai status converted to errno otherwise.
-     */
-    int (*split_info_get)(uint32_t hw_id, enum ops_sai_port_split mode,
-                          struct split_info *info);
-    /*
-     * Split port.
-     *
-     * @param[in] hw_id parent port HW lane id.
-     * @param[in] mode port split mode.
-     * @param[in] speed port speed.
-     * @param[in] sub_intf_hw_id_cnt count of sub-interfaces HW IDs.
-     * @param[in] sub_intf_hw_id list of sub-interfaces HW IDs.
-     *
-     * @return 0, sai status converted to errno otherwise.
-     */
-    int (*split)(uint32_t hw_id, enum ops_sai_port_split mode, uint32_t speed,
-                 uint32_t sub_intf_hw_id_cnt, const uint32_t *sub_intf_hw_id);
     /*
      * De-initialize port functionality.
      */
@@ -205,10 +166,6 @@ int ops_sai_port_flags_update(uint32_t, enum netdev_flags, enum netdev_flags,
 int ops_sai_port_pvid_get(uint32_t, sai_vlan_id_t *);
 int ops_sai_port_pvid_set(uint32_t, sai_vlan_id_t);
 int ops_sai_port_stats_get(uint32_t, struct netdev_stats *);
-int ops_sai_port_split_info_get(uint32_t, enum ops_sai_port_split,
-                                struct split_info *);
-int ops_sai_port_split(uint32_t, enum ops_sai_port_split, uint32_t,
-                       uint32_t, const uint32_t *);
 void ops_sai_port_deinit(void);
 
 #endif /* sai-port.h */
