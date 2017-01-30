@@ -9,7 +9,7 @@ set (INCL_DIR include)
 
 # Define compile flags
 # -g will should be removed in later versions
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=gnu99 -Werror -Wall -g -Wno-error=unused-function")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=gnu99 -Werror -Wall -g -Wno-error=unused-function -Wno-implicit-function-declaration")
 
 ###
 ### Define vendor
